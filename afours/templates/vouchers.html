@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>전표 원장</h2>
+<form class="filter" method="get" action="{{ url_for('vouchers') }}">
+  <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
+  <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <button type="submit">조회</button>
+</form>
+<table>
+  <thead>
+    <tr>
+      <th>전표번호</th><th>날짜</th><th>구분</th><th>공급가액</th><th>부가세</th><th>합계</th><th>거래처</th><th>적요</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r['voucher_no'] }}</td><td>{{ r['txn_date'] }}</td><td>{{ r['txn_type'] }}</td>
+        <td>{{ '{:,.0f}'.format(r['supply_amount']) }}</td><td>{{ '{:,.0f}'.format(r['vat_amount']) }}</td>
+        <td>{{ '{:,.0f}'.format(r['total_amount']) }}</td><td>{{ r['partner'] }}</td><td>{{ r['description'] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

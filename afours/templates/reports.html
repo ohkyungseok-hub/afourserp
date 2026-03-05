@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>시산표 / 손익계산</h2>
+<form class="filter" method="get" action="{{ url_for('reports') }}">
+  <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
+  <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <button type="submit">조회</button>
+</form>
+
+<div class="metrics">
+  <div class="card"><p>수익</p><strong>{{ '{:,.0f}'.format(revenue) }}</strong></div>
+  <div class="card"><p>비용</p><strong>{{ '{:,.0f}'.format(expense) }}</strong></div>
+  <div class="card"><p>순이익</p><strong>{{ '{:,.0f}'.format(profit) }}</strong></div>
+</div>
+
+<h3>합계잔액시산표</h3>
+<table>
+  <thead>
+    <tr><th>계정코드</th><th>계정과목</th><th>차변합계</th><th>대변합계</th></tr>
+  </thead>
+  <tbody>
+    {% for r in tb_rows %}
+      <tr>
+        <td>{{ r['account_code'] }}</td><td>{{ r['account_name'] }}</td>
+        <td>{{ '{:,.0f}'.format(r['debit']) }}</td><td>{{ '{:,.0f}'.format(r['credit']) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4">데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3>손익 계정</h3>
+<table>
+  <thead>
+    <tr><th>구분</th><th>계정코드</th><th>계정과목</th><th>금액</th></tr>
+  </thead>
+  <tbody>
+    {% for r in pl_rows %}
+      <tr>
+        <td>{{ r['account_type'] }}</td><td>{{ r['account_code'] }}</td><td>{{ r['account_name'] }}</td>
+        <td>{{ '{:,.0f}'.format(r['amount']) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4">데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

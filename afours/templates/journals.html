@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>분개장</h2>
+<form class="filter" method="get" action="{{ url_for('journals') }}">
+  <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
+  <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <button type="submit">조회</button>
+</form>
+<table>
+  <thead>
+    <tr><th>전표번호</th><th>날짜</th><th>차대</th><th>계정코드</th><th>계정과목</th><th>금액</th><th>거래처</th></tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r['voucher_no'] }}</td><td>{{ r['txn_date'] }}</td><td>{{ r['dr_cr'] }}</td>
+        <td>{{ r['account_code'] }}</td><td>{{ r['account_name'] or '(미등록)' }}</td>
+        <td>{{ '{:,.0f}'.format(r['amount']) }}</td><td>{{ r['partner'] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7">데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

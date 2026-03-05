@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>월마감</h2>
+<form method="post" class="panel">
+  <label>대상 년월
+    <select name="year_month" required>
+      {% for m in months %}
+        <option value="{{ m['year_month'] }}">{{ m['year_month'] }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>비고 <input type="text" name="note" placeholder="선택"></label>
+  <div class="row">
+    <button type="submit" name="action" value="close">월 마감</button>
+    <button type="submit" name="action" value="open" class="ghost">마감 해제</button>
+  </div>
+</form>
+
+<table>
+  <thead><tr><th>년월</th><th>상태</th><th>비고</th><th>처리일시</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r['year_month'] }}</td>
+        <td>{{ '마감' if r['is_closed'] == 1 else '열림' }}</td>
+        <td>{{ r['note'] }}</td>
+        <td>{{ r['closed_at'] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4">월마감 데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

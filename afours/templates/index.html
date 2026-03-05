@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>대시보드</h2>
+<form class="filter" method="get" action="{{ url_for('index') }}">
+  <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
+  <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <button type="submit">조회</button>
+</form>
+
+<div class="metrics">
+  <div class="card"><p>매출(공급가)</p><strong>{{ '{:,.0f}'.format(sales) }}</strong></div>
+  <div class="card"><p>매입(공급가)</p><strong>{{ '{:,.0f}'.format(purchases) }}</strong></div>
+  <div class="card"><p>순이익</p><strong>{{ '{:,.0f}'.format(profit) }}</strong></div>
+</div>
+
+<table>
+  <thead>
+    <tr><th>년월</th><th>매출</th><th>매입</th><th>손익</th></tr>
+  </thead>
+  <tbody>
+    {% for r in monthly %}
+      <tr>
+        <td>{{ r['year_month'] }}</td>
+        <td>{{ '{:,.0f}'.format(r['sales'] or 0) }}</td>
+        <td>{{ '{:,.0f}'.format(r['purchases'] or 0) }}</td>
+        <td>{{ '{:,.0f}'.format(r['profit'] or 0) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4">데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

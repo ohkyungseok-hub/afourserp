@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>엑셀 업로드</h2>
+<p class="help">필수 컬럼: 날짜, 구분(매입/매출), 공급가액. 부가세 없으면 10% 자동계산.</p>
+<form method="post" enctype="multipart/form-data" class="panel">
+  <input type="file" name="file" accept=".xlsx,.xls" required>
+  <button type="submit">업로드</button>
+</form>
+{% endblock %}

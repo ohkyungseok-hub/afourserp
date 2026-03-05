@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AFours ERP</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>AFours ERP 회계</h1>
+    <nav>
+      <a href="{{ url_for('index') }}">대시보드</a>
+      <a href="{{ url_for('upload') }}">엑셀 업로드</a>
+      <a href="{{ url_for('vouchers') }}">전표</a>
+      <a href="{{ url_for('journals') }}">분개장</a>
+      <a href="{{ url_for('reports') }}">시산표/손익</a>
+      <a href="{{ url_for('closing') }}">월마감</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
