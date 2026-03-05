@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>설정</h2>
+
+  <section class="panel">
+    <form method="post" style="display: grid; gap: 10px; width: 100%; max-width: 520px;">
+      <input type="hidden" name="action" value="change_password">
+      <h3 style="margin: 0;">비밀번호 변경</h3>
+      <label>
+        현재 비밀번호
+        <input type="password" name="current_password" required>
+      </label>
+      <label>
+        새 비밀번호
+        <input type="password" name="change_password" required>
+      </label>
+      <label>
+        새 비밀번호 확인
+        <input type="password" name="change_password_confirm" required>
+      </label>
+      <button type="submit">비밀번호 변경</button>
+    </form>
+  </section>
+
+  {% if auth_is_admin %}
+    <section class="panel">
+      <form method="post" style="display: grid; gap: 10px; width: 100%; max-width: 520px;">
+        <input type="hidden" name="action" value="create_user">
+        <h3 style="margin: 0;">신규 ID 등록</h3>
+        <label>
+          신규 ID
+          <input type="text" name="new_username" minlength="3" required>
+        </label>
+        <label>
+          초기 비밀번호
+          <input type="password" name="new_password" minlength="6" required>
+        </label>
+        <label>
+          초기 비밀번호 확인
+          <input type="password" name="new_password_confirm" minlength="6" required>
+        </label>
+        <button type="submit">신규 ID 등록</button>
+      </form>
+    </section>
+  {% endif %}
+
+  <section class="panel" style="display:block;">
+    <h3 style="margin-top: 0;">사용자 목록</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>권한</th>
+          <th>활성</th>
+          <th>등록일시</th>
+          <th>수정일시</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+          <tr>
+            <td>{{ u['username'] }}</td>
+            <td>{{ '관리자' if u['is_admin'] == 1 else '일반' }}</td>
+            <td>{{ 'Y' if u['is_active'] == 1 else 'N' }}</td>
+            <td>{{ u['created_at'] }}</td>
+            <td>{{ u['updated_at'] }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5">등록된 사용자가 없습니다.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

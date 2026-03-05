@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 try:
     import pandas as pd
@@ -89,6 +90,62 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def ensure_default_auth_user(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    current_count = conn.execute("SELECT COUNT(*) AS cnt FROM app_users").fetchone()["cnt"]
+    if int(current_count) > 0:
+        return
+
+    conn.execute(
+        """
+        INSERT INTO app_users(username, password_hash, is_admin, is_active, created_at, updated_at)
+        VALUES (?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (get_login_username(), generate_password_hash(get_login_password())),
+    )
+
+
+def get_current_user(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    username = (session.get("auth_user") or "").strip()
+    if not username:
+        return None
+    return conn.execute(
+        """
+        SELECT id, username, is_admin, is_active
+        FROM app_users
+        WHERE username = ?
+        """,
+        (username,),
+    ).fetchone()
+
+
+def verify_login_credentials(conn: sqlite3.Connection, username: str, password: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT password_hash, is_active
+        FROM app_users
+        WHERE username = ?
+        """,
+        (username,),
+    ).fetchone()
+    if not row or int(row["is_active"]) != 1:
+        return False
+    return check_password_hash(str(row["password_hash"]), password)
 
 
 def init_db() -> None:
@@ -191,6 +248,7 @@ def init_db() -> None:
         )
         """
     )
+    ensure_default_auth_user(conn)
     ensure_bank_table_columns(conn)
     ensure_batch_columns(conn)
     conn.executemany(
@@ -958,8 +1016,13 @@ def inject_top_rollback_batches():
         LIMIT 200
         """
     ).fetchall()
+    user = get_current_user(conn)
     conn.close()
-    return {"top_rollback_batches": batches, "auth_user": session.get("auth_user")}
+    return {
+        "top_rollback_batches": batches,
+        "auth_user": session.get("auth_user"),
+        "auth_is_admin": bool(user and int(user["is_admin"]) == 1),
+    }
 
 
 @app.before_request
@@ -979,11 +1042,10 @@ def login():
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
         next_path = (request.form.get("next") or "").strip()
-        expected_username = get_login_username()
-        expected_password = get_login_password()
-        id_ok = hmac.compare_digest(username, expected_username)
-        pw_ok = hmac.compare_digest(password, expected_password)
-        if id_ok and pw_ok:
+        conn = get_conn()
+        ok = verify_login_credentials(conn, username, password)
+        conn.close()
+        if ok:
             session.clear()
             session["auth_user"] = username
             session["logged_in_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1006,6 +1068,88 @@ def logout():
     session.clear()
     flash("로그아웃되었습니다.", "success")
     return redirect(url_for("login"))
+
+
+@app.route("/settings/users", methods=["GET", "POST"])
+def settings_users():
+    conn = get_conn()
+    user = get_current_user(conn)
+    if not user:
+        conn.close()
+        return redirect(url_for("login", next=request.path))
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+
+        if action == "create_user":
+            if int(user["is_admin"]) != 1:
+                conn.close()
+                flash("권한 없음: 관리자만 신규 ID를 생성할 수 있습니다.", "error")
+                return redirect(url_for("settings_users"))
+
+            username = (request.form.get("new_username") or "").strip()
+            password = request.form.get("new_password") or ""
+            password_confirm = request.form.get("new_password_confirm") or ""
+            if len(username) < 3:
+                flash("신규 ID는 3자 이상으로 입력하세요.", "error")
+            elif len(password) < 6:
+                flash("비밀번호는 6자 이상으로 입력하세요.", "error")
+            elif not hmac.compare_digest(password, password_confirm):
+                flash("신규 비밀번호 확인값이 일치하지 않습니다.", "error")
+            else:
+                exists = conn.execute(
+                    "SELECT 1 FROM app_users WHERE username = ?",
+                    (username,),
+                ).fetchone()
+                if exists:
+                    flash("이미 존재하는 ID입니다.", "error")
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO app_users(username, password_hash, is_admin, is_active, created_at, updated_at)
+                        VALUES (?, ?, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """,
+                        (username, generate_password_hash(password)),
+                    )
+                    conn.commit()
+                    flash("신규 ID가 등록되었습니다.", "success")
+
+        elif action == "change_password":
+            current_password = request.form.get("current_password") or ""
+            new_password = request.form.get("change_password") or ""
+            new_password_confirm = request.form.get("change_password_confirm") or ""
+            if not verify_login_credentials(conn, str(user["username"]), current_password):
+                flash("현재 비밀번호가 올바르지 않습니다.", "error")
+            elif len(new_password) < 6:
+                flash("새 비밀번호는 6자 이상으로 입력하세요.", "error")
+            elif not hmac.compare_digest(new_password, new_password_confirm):
+                flash("새 비밀번호 확인값이 일치하지 않습니다.", "error")
+            else:
+                conn.execute(
+                    """
+                    UPDATE app_users
+                    SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (generate_password_hash(new_password), int(user["id"])),
+                )
+                conn.commit()
+                flash("비밀번호가 변경되었습니다.", "success")
+        else:
+            flash("잘못된 요청입니다.", "error")
+
+        conn.close()
+        return redirect(url_for("settings_users"))
+
+    users = conn.execute(
+        """
+        SELECT username, is_admin, is_active, created_at, updated_at
+        FROM app_users
+        ORDER BY id DESC
+        """
+    ).fetchall()
+    conn.close()
+    return render_template("settings_users.html", users=users)
 
 
 @app.route("/export-xlsx")
