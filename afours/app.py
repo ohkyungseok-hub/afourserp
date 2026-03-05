@@ -14,7 +14,7 @@ try:
 except Exception:
     Xlsx2csv = None
 
-DB_PATH = Path("accounting.db")
+DB_PATH = Path(__file__).resolve().parent / "accounting.db"
 
 COLUMN_CANDIDATES = {
     "date": ["발급일자", "날짜", "일자", "거래일", "date", "Date"],

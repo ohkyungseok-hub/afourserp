@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AFours ERP 로그인</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+    <section class="card login-wrap">
+      <h2>로그인</h2>
+      <p class="help">기본 계정은 <code>admin / admin1234</code> 입니다. 운영 시 환경변수 변경 권장.</p>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      <form method="post" class="panel" style="margin-bottom: 0;">
+        <input type="hidden" name="next" value="{{ next_path }}">
+        <label style="width: 100%;">
+          아이디
+          <input type="text" name="username" autocomplete="username" required>
+        </label>
+        <label style="width: 100%;">
+          비밀번호
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">로그인</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

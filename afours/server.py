@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import sqlite3
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template, request, send_file, url_for
+from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for
 from werkzeug.utils import secure_filename
 try:
     import pandas as pd
@@ -68,6 +69,20 @@ DEFAULT_ACCOUNTS = [
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "afours-erp-secret-key")
 app.config["UPLOAD_FOLDER"] = str(UPLOAD_DIR)
+
+
+def get_login_username() -> str:
+    return os.environ.get("ERP_LOGIN_ID", "admin")
+
+
+def get_login_password() -> str:
+    return os.environ.get("ERP_LOGIN_PASSWORD", "admin1234")
+
+
+def is_safe_next_path(value: str | None) -> bool:
+    if not value:
+        return False
+    return value.startswith("/") and not value.startswith("//")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -944,7 +959,53 @@ def inject_top_rollback_batches():
         """
     ).fetchall()
     conn.close()
-    return {"top_rollback_batches": batches}
+    return {"top_rollback_batches": batches, "auth_user": session.get("auth_user")}
+
+
+@app.before_request
+def require_login():
+    endpoint = request.endpoint or ""
+    if endpoint in {"login", "static"}:
+        return None
+    if session.get("auth_user"):
+        return None
+    next_path = request.full_path if request.query_string else request.path
+    return redirect(url_for("login", next=next_path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        next_path = (request.form.get("next") or "").strip()
+        expected_username = get_login_username()
+        expected_password = get_login_password()
+        id_ok = hmac.compare_digest(username, expected_username)
+        pw_ok = hmac.compare_digest(password, expected_password)
+        if id_ok and pw_ok:
+            session.clear()
+            session["auth_user"] = username
+            session["logged_in_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            flash("로그인되었습니다.", "success")
+            if is_safe_next_path(next_path):
+                return redirect(next_path)
+            return redirect(url_for("index"))
+        flash("로그인 실패: 아이디 또는 비밀번호를 확인하세요.", "error")
+
+    if session.get("auth_user"):
+        return redirect(url_for("index"))
+    next_path = (request.args.get("next") or "").strip()
+    if not is_safe_next_path(next_path):
+        next_path = ""
+    return render_template("login.html", next_path=next_path)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    flash("로그아웃되었습니다.", "success")
+    return redirect(url_for("login"))
 
 
 @app.route("/export-xlsx")

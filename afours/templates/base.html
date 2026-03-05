@@ -10,16 +10,24 @@
   <header class="topbar">
     <div class="topbar-head">
       <h1>AFours ERP 회계</h1>
-      <form method="post" action="{{ url_for('rollback') }}" class="top-rollback-form" onsubmit="return confirm('선택한 업로드 일시 기준으로 이후 데이터가 삭제됩니다. 계속할까요?');">
-        <input type="hidden" name="next" value="{{ request.full_path if request.full_path else request.path }}">
-        <select name="batch_id" required>
-          <option value="">업로드 일시 선택</option>
-          {% for b in top_rollback_batches %}
-            <option value="{{ b['id'] }}">{{ b['uploaded_at'] }}</option>
-          {% endfor %}
-        </select>
-        <button type="submit" class="ghost">롤백</button>
-      </form>
+      <div class="topbar-actions">
+        <form method="post" action="{{ url_for('rollback') }}" class="top-rollback-form" onsubmit="return confirm('선택한 업로드 일시 기준으로 이후 데이터가 삭제됩니다. 계속할까요?');">
+          <input type="hidden" name="next" value="{{ request.full_path if request.full_path else request.path }}">
+          <select name="batch_id" required>
+            <option value="">업로드 일시 선택</option>
+            {% for b in top_rollback_batches %}
+              <option value="{{ b['id'] }}">{{ b['uploaded_at'] }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="ghost">롤백</button>
+        </form>
+        {% if auth_user %}
+          <span class="auth-user">{{ auth_user }}</span>
+          <form method="post" action="{{ url_for('logout') }}">
+            <button type="submit" class="ghost">로그아웃</button>
+          </form>
+        {% endif %}
+      </div>
     </div>
     <nav>
       <a href="{{ url_for('index') }}">대시보드</a>

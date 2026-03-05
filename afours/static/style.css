@@ -26,6 +26,21 @@ body {
   align-items: center;
   gap: 12px;
 }
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.auth-user {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.15);
+  font-size: 13px;
+}
 .topbar h1 { margin: 0 0 8px; font-size: 20px; }
 .topbar nav { display: flex; flex-wrap: wrap; gap: 10px; }
 .topbar a {
@@ -125,3 +140,8 @@ th { background: #f2f5f8; }
   background: var(--brand);
 }
 .btn-link.ghost { background: #64748b; }
+
+.login-wrap {
+  max-width: 420px;
+  margin: 70px auto;
+}
