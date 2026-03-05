@@ -5,6 +5,8 @@
   <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
   <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
   <button type="submit">조회</button>
+  <a href="{{ url_for('index', quick='60') }}" class="btn-link {% if quick == '60' %}ghost{% endif %}">최근 60일 보기</a>
+  <a href="{{ url_for('index', quick='90') }}" class="btn-link {% if quick == '90' %}ghost{% endif %}">최근 90일 보기</a>
 </form>
 
 <div class="metrics">

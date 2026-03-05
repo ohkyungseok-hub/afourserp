@@ -4,12 +4,27 @@
 <form class="filter" method="get" action="{{ url_for('vouchers') }}">
   <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
   <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <label>구분
+    <select name="txn_type">
+      <option value="" {% if txn_type == '' %}selected{% endif %}>전체</option>
+      <option value="매입" {% if txn_type == '매입' %}selected{% endif %}>매입</option>
+      <option value="매출" {% if txn_type == '매출' %}selected{% endif %}>매출</option>
+    </select>
+  </label>
+  <label>상태
+    <select name="status">
+      <option value="" {% if status_filter == '' %}selected{% endif %}>전체</option>
+      <option value="지급완료" {% if status_filter == '지급완료' %}selected{% endif %}>지급완료</option>
+      <option value="미지급금" {% if status_filter == '미지급금' %}selected{% endif %}>미지급금</option>
+      <option value="-" {% if status_filter == '-' %}selected{% endif %}>-</option>
+    </select>
+  </label>
   <button type="submit">조회</button>
 </form>
 <table>
   <thead>
     <tr>
-      <th>전표번호</th><th>날짜</th><th>구분</th><th>공급가액</th><th>부가세</th><th>합계</th><th>거래처</th><th>적요</th>
+      <th>전표번호</th><th>날짜</th><th>구분</th><th>공급가액</th><th>부가세</th><th>합계</th><th>지급액</th><th>미지급잔액</th><th>상태</th><th>상태수정</th><th>거래처</th><th>적요</th>
     </tr>
   </thead>
   <tbody>
@@ -17,10 +32,27 @@
       <tr>
         <td>{{ r['voucher_no'] }}</td><td>{{ r['txn_date'] }}</td><td>{{ r['txn_type'] }}</td>
         <td>{{ '{:,.0f}'.format(r['supply_amount']) }}</td><td>{{ '{:,.0f}'.format(r['vat_amount']) }}</td>
-        <td>{{ '{:,.0f}'.format(r['total_amount']) }}</td><td>{{ r['partner'] }}</td><td>{{ r['description'] }}</td>
+        <td>{{ '{:,.0f}'.format(r['total_amount']) }}</td><td>{{ '{:,.0f}'.format(r['paid_amount']) }}</td><td>{{ '{:,.0f}'.format(r['unpaid_amount']) }}</td>
+        <td>{{ r['payable_status'] }}{% if r['manual_status'] %} (수동){% endif %}</td>
+        <td>
+          <form method="post" action="{{ url_for('update_voucher_status') }}" style="display:flex; gap:6px; align-items:center;">
+            <input type="hidden" name="voucher_id" value="{{ r['id'] }}">
+            <input type="hidden" name="start" value="{{ start or '' }}">
+            <input type="hidden" name="end" value="{{ end or '' }}">
+            <input type="hidden" name="txn_type" value="{{ txn_type or '' }}">
+            <input type="hidden" name="status_filter" value="{{ status_filter or '' }}">
+            <select name="status">
+              <option value="">자동</option>
+              <option value="지급완료" {% if r['manual_status'] == '지급완료' %}selected{% endif %}>지급완료</option>
+              <option value="미지급금" {% if r['manual_status'] == '미지급금' %}selected{% endif %}>미지급금</option>
+            </select>
+            <button type="submit">저장</button>
+          </form>
+        </td>
+        <td>{{ r['partner'] }}</td><td>{{ r['description'] }}</td>
       </tr>
     {% else %}
-      <tr><td colspan="8">데이터가 없습니다.</td></tr>
+      <tr><td colspan="12">데이터가 없습니다.</td></tr>
     {% endfor %}
   </tbody>
 </table>

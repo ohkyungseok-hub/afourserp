@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>통장 입출금 내역</h2>
+<form class="filter" method="get" action="{{ url_for('bank_transactions') }}">
+  <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
+  <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <label>입출금구분
+    <select name="io_type">
+      <option value="" {% if io_type == '' %}selected{% endif %}>전체</option>
+      <option value="입금" {% if io_type == '입금' %}selected{% endif %}>입금</option>
+      <option value="출금" {% if io_type == '출금' %}selected{% endif %}>출금</option>
+    </select>
+  </label>
+  <button type="submit">조회</button>
+</form>
+<table>
+  <thead>
+    <tr><th>거래일</th><th>구분</th><th>거래처</th><th>입금</th><th>출금</th><th>금액</th><th>내용</th><th>원본파일</th></tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r['txn_date'] }}</td>
+        <td>{{ r['io_type'] }}</td>
+        <td>{{ r['partner'] }}</td>
+        <td>{{ '{:,.0f}'.format(r['in_amount']) }}</td>
+        <td>{{ '{:,.0f}'.format(r['out_amount']) }}</td>
+        <td>{{ '{:,.0f}'.format(r['amount']) }}</td>
+        <td>{{ r['description'] }}</td>
+        <td>{{ r['source_file'] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">데이터가 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

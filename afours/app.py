@@ -3,11 +3,16 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from datetime import date
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+try:
+    from xlsx2csv import Xlsx2csv
+except Exception:
+    Xlsx2csv = None
 
 DB_PATH = Path("accounting.db")
 
@@ -349,6 +354,24 @@ def normalize_upload_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
         "partner",
     ]]
 
+
+
+
+def safe_read_excel(source, filename: str) -> pd.DataFrame:
+    try:
+        return pd.read_excel(source, header=None)
+    except Exception as exc:
+        message = str(exc)
+        is_xlsx = filename.lower().endswith('.xlsx')
+        if is_xlsx and 'styleId' in message and Xlsx2csv is not None:
+            output = StringIO()
+            source.seek(0)
+            data = source.read()
+            Xlsx2csv(BytesIO(data), outputencoding='utf-8').convert(output, sheetid=1)
+            output.seek(0)
+            source.seek(0)
+            return pd.read_csv(output, header=None)
+        raise
 
 def hash_voucher(row: pd.Series) -> str:
     payload = "|".join(
@@ -934,7 +957,7 @@ def main() -> None:
 
         for file in files:
             try:
-                raw_df = pd.read_excel(file, header=None)
+                raw_df = safe_read_excel(file, file.name)
                 raw_df = extract_columns_with_header_detection(raw_df)
                 normalized = normalize_upload_dataframe(raw_df)
                 result = insert_from_upload(conn, normalized, file.name)

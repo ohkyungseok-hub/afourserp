@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>업로드 기준 롤백</h2>
+<p class="help">선택한 업로드 시점 이후 데이터(세금계산서/통장)가 삭제됩니다.</p>
+
+<form method="post" class="panel">
+  <label>업로드 기준 일시
+    <select name="batch_id" required>
+      <option value="">선택하세요</option>
+      {% for b in batches %}
+        <option value="{{ b['id'] }}">
+          [#{{ b['id'] }}] {{ b['uploaded_at'] }} | {{ b['source_type'] }} | {{ b['source_file'] or '-' }} | 저장 {{ b['saved_count'] }}건
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="ghost">선택 시점으로 롤백 실행</button>
+</form>
+
+<table>
+  <thead>
+    <tr><th>ID</th><th>업로드일시</th><th>유형</th><th>파일명</th><th>저장건수</th></tr>
+  </thead>
+  <tbody>
+    {% for b in batches %}
+      <tr>
+        <td>{{ b['id'] }}</td>
+        <td>{{ b['uploaded_at'] }}</td>
+        <td>{{ b['source_type'] }}</td>
+        <td>{{ b['source_file'] or '-' }}</td>
+        <td>{{ b['saved_count'] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5">업로드 이력이 없습니다.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

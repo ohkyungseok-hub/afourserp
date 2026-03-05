@@ -5,3 +5,4 @@ streamlit
 flask
 werkzeug
 gunicorn
+xlsx2csv

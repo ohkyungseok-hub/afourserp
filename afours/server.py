@@ -3,15 +3,21 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-from datetime import datetime
+from io import BytesIO, StringIO
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, flash, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 try:
     import pandas as pd
 except Exception:
     pd = None
+
+try:
+    from xlsx2csv import Xlsx2csv
+except Exception:
+    Xlsx2csv = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "accounting.db"
@@ -25,6 +31,27 @@ COLUMN_CANDIDATES = {
     "vat": ["부가세", "세액", "vat", "VAT"],
     "description": ["적요", "내용", "description", "Description"],
     "partner": ["거래처", "상호", "partner", "Partner"],
+}
+
+BANK_COLUMN_CANDIDATES = {
+    "date": ["거래일시", "거래일자", "거래일", "일자", "날짜", "date", "Date"],
+    "partner": [
+        "거래처",
+        "입금자명",
+        "출금처",
+        "거래내용",
+        "상대계좌예금주명",
+        "적요",
+        "내용",
+        "상호",
+        "partner",
+        "Partner",
+    ],
+    "amount": ["거래금액", "금액", "amount", "Amount"],
+    "out_amount": ["출금", "출금액"],
+    "in_amount": ["입금", "입금액"],
+    "io_type": ["입출금", "거래구분", "구분", "유형", "type", "Type"],
+    "description": ["거래내용", "적요", "내용", "메모", "description", "Description"],
 }
 
 DEFAULT_ACCOUNTS = [
@@ -111,12 +138,85 @@ def init_db() -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bank_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            txn_date TEXT NOT NULL,
+            year_month TEXT NOT NULL,
+            partner TEXT,
+            io_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            in_amount REAL NOT NULL DEFAULT 0,
+            out_amount REAL NOT NULL DEFAULT 0,
+            description TEXT,
+            source_file TEXT,
+            tx_hash TEXT UNIQUE NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS voucher_status_overrides (
+            voucher_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL CHECK(status IN ('지급완료', '미지급금')),
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS upload_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT NOT NULL CHECK(source_type IN ('세금계산서', '통장')),
+            source_file TEXT,
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            saved_count INTEGER DEFAULT 0
+        )
+        """
+    )
+    ensure_bank_table_columns(conn)
+    ensure_batch_columns(conn)
     conn.executemany(
         "INSERT OR IGNORE INTO accounts(account_code, account_name, account_type) VALUES (?, ?, ?)",
         DEFAULT_ACCOUNTS,
     )
     conn.commit()
     conn.close()
+
+
+def ensure_bank_table_columns(conn: sqlite3.Connection) -> None:
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(bank_transactions)").fetchall()
+    }
+    if "io_type" not in cols:
+        conn.execute("ALTER TABLE bank_transactions ADD COLUMN io_type TEXT DEFAULT '출금'")
+    if "in_amount" not in cols:
+        conn.execute("ALTER TABLE bank_transactions ADD COLUMN in_amount REAL DEFAULT 0")
+    if "out_amount" not in cols:
+        conn.execute("ALTER TABLE bank_transactions ADD COLUMN out_amount REAL DEFAULT 0")
+
+
+def ensure_batch_columns(conn: sqlite3.Connection) -> None:
+    voucher_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(vouchers)").fetchall()
+    }
+    if "batch_id" not in voucher_cols:
+        conn.execute("ALTER TABLE vouchers ADD COLUMN batch_id INTEGER")
+
+    journal_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()
+    }
+    if "batch_id" not in journal_cols:
+        conn.execute("ALTER TABLE journal_entries ADD COLUMN batch_id INTEGER")
+
+    bank_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(bank_transactions)").fetchall()
+    }
+    if "batch_id" not in bank_cols:
+        conn.execute("ALTER TABLE bank_transactions ADD COLUMN batch_id INTEGER")
 
 
 # Ensure schema exists when running under WSGI servers like gunicorn.
@@ -132,6 +232,17 @@ def find_column(df: pd.DataFrame, key: str) -> str | None:
     for col in df.columns:
         normalized_map[normalize_text(col)] = col
     for candidate in COLUMN_CANDIDATES[key]:
+        hit = normalized_map.get(normalize_text(candidate))
+        if hit is not None:
+            return hit
+    return None
+
+
+def find_bank_column(df: pd.DataFrame, key: str) -> str | None:
+    normalized_map: dict[str, str] = {}
+    for col in df.columns:
+        normalized_map[normalize_text(col)] = col
+    for candidate in BANK_COLUMN_CANDIDATES[key]:
         hit = normalized_map.get(normalize_text(candidate))
         if hit is not None:
             return hit
@@ -176,6 +287,46 @@ def extract_columns_with_header_detection(raw_df: pd.DataFrame) -> pd.DataFrame:
             best_row = i
 
     if best_row is None or best_score < 2:
+        df = raw_df.copy()
+        df.columns = [str(c) for c in df.columns]
+        return df
+
+    header = raw_df.iloc[best_row].tolist()
+    columns = []
+    for idx, value in enumerate(header):
+        name = str(value).strip() if pd.notna(value) else ""
+        columns.append(name if name else f"COL_{idx}")
+
+    df = raw_df.iloc[best_row + 1 :].copy().reset_index(drop=True)
+    df.columns = columns
+    return df
+
+
+def extract_bank_columns_with_header_detection(raw_df: pd.DataFrame) -> pd.DataFrame:
+    required_keys = ["date"]
+    best_row = None
+    best_score = -1
+    scan_rows = min(len(raw_df), 15)
+
+    for i in range(scan_rows):
+        row_values = [normalize_text(v) for v in raw_df.iloc[i].tolist()]
+        score = 0
+        for key in required_keys:
+            candidates = {normalize_text(c) for c in BANK_COLUMN_CANDIDATES[key]}
+            if any(v in candidates for v in row_values):
+                score += 1
+        amount_candidates = (
+            {normalize_text(c) for c in BANK_COLUMN_CANDIDATES["amount"]}
+            | {normalize_text(c) for c in BANK_COLUMN_CANDIDATES["out_amount"]}
+            | {normalize_text(c) for c in BANK_COLUMN_CANDIDATES["in_amount"]}
+        )
+        if any(v in amount_candidates for v in row_values):
+            score += 1
+        if score > best_score:
+            best_score = score
+            best_row = i
+
+    if best_row is None or best_score < 1:
         df = raw_df.copy()
         df.columns = [str(c) for c in df.columns]
         return df
@@ -253,6 +404,122 @@ def normalize_upload_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     ]]
 
 
+def normalize_bank_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
+    date_col = find_bank_column(raw_df, "date")
+    amount_col = find_bank_column(raw_df, "amount")
+    out_col = find_bank_column(raw_df, "out_amount")
+    in_col = find_bank_column(raw_df, "in_amount")
+    partner_col = find_bank_column(raw_df, "partner")
+    io_col = find_bank_column(raw_df, "io_type")
+    desc_col = find_bank_column(raw_df, "description")
+
+    if not date_col or (not amount_col and not out_col and not in_col):
+        raise ValueError("통장 필수 컬럼 부족: 거래일시(또는 거래일자), 출금(또는 거래금액)")
+
+    date_series = get_series(raw_df, date_col)
+    amount_series = to_numeric(get_series(raw_df, amount_col)) if amount_col else pd.Series([0] * len(raw_df))
+    out_series = to_numeric(get_series(raw_df, out_col)) if out_col else pd.Series([0] * len(raw_df))
+    in_series = to_numeric(get_series(raw_df, in_col)) if in_col else pd.Series([0] * len(raw_df))
+    partner_series = (
+        get_series(raw_df, partner_col) if partner_col else pd.Series([""] * len(raw_df))
+    )
+    desc_series = (
+        get_series(raw_df, desc_col) if desc_col else pd.Series([""] * len(raw_df))
+    )
+
+    base = pd.DataFrame()
+    base["txn_date"] = pd.to_datetime(date_series, errors="coerce")
+    base["partner"] = partner_series.astype(str).str.strip()
+    base["description"] = desc_series.astype(str).str.strip()
+    base.loc[base["partner"] == "", "partner"] = base["description"]
+
+    rows: list[pd.DataFrame] = []
+    if out_col or in_col:
+        out_df = base.copy()
+        out_df["io_type"] = "출금"
+        out_df["out_amount"] = out_series.abs().fillna(0)
+        out_df["in_amount"] = 0.0
+        out_df["amount"] = out_df["out_amount"]
+        out_df = out_df[out_df["out_amount"] > 0]
+        rows.append(out_df)
+
+        in_df = base.copy()
+        in_df["io_type"] = "입금"
+        in_df["in_amount"] = in_series.abs().fillna(0)
+        in_df["out_amount"] = 0.0
+        in_df["amount"] = in_df["in_amount"]
+        in_df = in_df[in_df["in_amount"] > 0]
+        rows.append(in_df)
+    else:
+        single = base.copy()
+        if io_col:
+            io_series = get_series(raw_df, io_col).astype(str).str.strip().str.lower()
+            outflow_mask = io_series.str.contains("출금|지급|인출")
+            single["io_type"] = outflow_mask.map({True: "출금", False: "입금"})
+        else:
+            single["io_type"] = (amount_series < 0).map({True: "출금", False: "입금"})
+        single["amount"] = amount_series.abs().fillna(0)
+        single["out_amount"] = single.apply(
+            lambda x: x["amount"] if x["io_type"] == "출금" else 0.0, axis=1
+        )
+        single["in_amount"] = single.apply(
+            lambda x: x["amount"] if x["io_type"] == "입금" else 0.0, axis=1
+        )
+        single = single[single["amount"] > 0]
+        rows.append(single)
+
+    df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "txn_date",
+                "year_month",
+                "partner",
+                "io_type",
+                "amount",
+                "in_amount",
+                "out_amount",
+                "description",
+            ]
+        )
+
+    df = df.dropna(subset=["txn_date", "amount"])
+    df["txn_date"] = df["txn_date"].dt.strftime("%Y-%m-%d")
+    df["year_month"] = pd.to_datetime(df["txn_date"]).dt.to_period("M").astype(str)
+    return df[
+        [
+            "txn_date",
+            "year_month",
+            "partner",
+            "io_type",
+            "amount",
+            "in_amount",
+            "out_amount",
+            "description",
+        ]
+    ]
+
+
+
+
+def safe_read_excel(source, filename: str) -> pd.DataFrame:
+    try:
+        return pd.read_excel(source, header=None)
+    except Exception as exc:
+        message = str(exc)
+        is_xlsx = filename.lower().endswith('.xlsx')
+        if is_xlsx and 'styleId' in message and Xlsx2csv is not None:
+            output = StringIO()
+            if isinstance(source, (str, Path)):
+                Xlsx2csv(str(source), outputencoding='utf-8').convert(output, sheetid=1)
+            else:
+                source.seek(0)
+                data = source.read()
+                Xlsx2csv(BytesIO(data), outputencoding='utf-8').convert(output, sheetid=1)
+            output.seek(0)
+            return pd.read_csv(output, header=None)
+        raise
+
 def hash_voucher(row: pd.Series) -> str:
     payload = "|".join(
         [
@@ -279,6 +546,26 @@ def is_month_closed(conn: sqlite3.Connection, year_month: str) -> bool:
     return bool(row and row[0] == 1)
 
 
+def create_upload_batch(conn: sqlite3.Connection, source_type: str, source_file: str) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO upload_batches(source_type, source_file, uploaded_at, saved_count)
+        VALUES (?, ?, CURRENT_TIMESTAMP, 0)
+        """,
+        (source_type, source_file),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_upload_batch_saved_count(conn: sqlite3.Connection, batch_id: int, saved_count: int) -> None:
+    conn.execute(
+        "UPDATE upload_batches SET saved_count = ? WHERE id = ?",
+        (int(saved_count), int(batch_id)),
+    )
+    conn.commit()
+
+
 def create_journal_lines(txn_type: str, supply: float, vat: float) -> list[tuple[str, str, float]]:
     if txn_type == "매출":
         lines = [("차변", "1200", supply + vat), ("대변", "4000", supply)]
@@ -292,7 +579,9 @@ def create_journal_lines(txn_type: str, supply: float, vat: float) -> list[tuple
     return lines
 
 
-def insert_uploaded_rows(conn: sqlite3.Connection, df: pd.DataFrame, source_file: str) -> dict[str, int]:
+def insert_uploaded_rows(
+    conn: sqlite3.Connection, df: pd.DataFrame, source_file: str, batch_id: int
+) -> dict[str, int]:
     result = {"saved": 0, "duplicate": 0, "closed": 0}
 
     for _, row in df.iterrows():
@@ -308,8 +597,8 @@ def insert_uploaded_rows(conn: sqlite3.Connection, df: pd.DataFrame, source_file
             INSERT OR IGNORE INTO vouchers (
                 voucher_no, txn_date, year_month, txn_type,
                 supply_amount, vat_amount, total_amount,
-                description, partner, source_file, voucher_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                description, partner, source_file, voucher_hash, batch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 voucher_no,
@@ -323,6 +612,7 @@ def insert_uploaded_rows(conn: sqlite3.Connection, df: pd.DataFrame, source_file
                 row["partner"],
                 source_file,
                 voucher_hash,
+                batch_id,
             ),
         )
         if cur.rowcount != 1:
@@ -338,8 +628,8 @@ def insert_uploaded_rows(conn: sqlite3.Connection, df: pd.DataFrame, source_file
                 """
                 INSERT INTO journal_entries (
                     voucher_hash, voucher_no, line_no, txn_date, year_month,
-                    dr_cr, account_code, amount, description, partner
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    dr_cr, account_code, amount, description, partner, batch_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     voucher_hash,
@@ -352,6 +642,7 @@ def insert_uploaded_rows(conn: sqlite3.Connection, df: pd.DataFrame, source_file
                     float(amount),
                     row["description"],
                     row["partner"],
+                    batch_id,
                 ),
             )
             line_no += 1
@@ -361,16 +652,342 @@ def insert_uploaded_rows(conn: sqlite3.Connection, df: pd.DataFrame, source_file
     return result
 
 
+def hash_bank_txn(row: pd.Series) -> str:
+    payload = "|".join(
+        [
+            str(row["txn_date"]),
+            str(row["partner"]),
+            str(row["io_type"]),
+            f"{float(row['amount']):.2f}",
+            str(row["description"]),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compact_partner_name(value: object) -> str:
+    return normalize_text(value)
+
+
+def longest_common_substring_len(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    dp = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        prev = 0
+        for j in range(1, len(b) + 1):
+            temp = dp[j]
+            if a[i - 1] == b[j - 1]:
+                dp[j] = prev + 1
+                if dp[j] > best:
+                    best = dp[j]
+            else:
+                dp[j] = 0
+            prev = temp
+    return best
+
+
+def partner_match_score(voucher_partner: str, bank_partner: str) -> int:
+    v = compact_partner_name(voucher_partner)
+    b = compact_partner_name(bank_partner)
+    if not v or not b:
+        return 0
+    if v == b:
+        return 1000 + len(v)
+    common_len = longest_common_substring_len(v, b)
+    if common_len >= 2:
+        return common_len
+    return 0
+
+
+def insert_bank_rows(
+    conn: sqlite3.Connection, df: pd.DataFrame, source_file: str, batch_id: int
+) -> dict[str, int]:
+    result = {"saved": 0, "duplicate": 0}
+    for _, row in df.iterrows():
+        tx_hash = hash_bank_txn(row)
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO bank_transactions (
+                txn_date, year_month, partner, io_type, amount, in_amount, out_amount,
+                description, source_file, tx_hash, batch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["txn_date"],
+                row["year_month"],
+                row["partner"],
+                row["io_type"],
+                float(row["amount"]),
+                float(row["in_amount"]),
+                float(row["out_amount"]),
+                row["description"],
+                source_file,
+                tx_hash,
+                batch_id,
+            ),
+        )
+        if cur.rowcount == 1:
+            result["saved"] += 1
+        else:
+            result["duplicate"] += 1
+    conn.commit()
+    return result
+
+
+def apply_payable_status(conn: sqlite3.Connection, rows: list[sqlite3.Row], end_date: str | None) -> list[dict]:
+    payment_rows = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(TRIM(partner), ''), '(미입력)') AS partner_name,
+               SUM(amount) AS paid_amount
+        FROM bank_transactions
+        WHERE (? IS NULL OR txn_date <= ?)
+          AND COALESCE(io_type, '출금') = '출금'
+        GROUP BY partner_name
+        """,
+        (end_date, end_date),
+    ).fetchall()
+    voucher_partner_names = {
+        ((dict(r).get("partner") or "").strip() or "(미입력)") for r in rows
+    }
+    paid_map = {name: 0.0 for name in voucher_partner_names}
+
+    for r in payment_rows:
+        bank_partner_name = r["partner_name"]
+        amount = float(r["paid_amount"] or 0)
+        best_partner = None
+        best_score = 0
+        for voucher_partner in voucher_partner_names:
+            score = partner_match_score(voucher_partner, bank_partner_name)
+            if score > best_score:
+                best_score = score
+                best_partner = voucher_partner
+        if best_partner is not None and best_score > 0:
+            paid_map[best_partner] = paid_map.get(best_partner, 0.0) + amount
+
+    partner_groups: dict[str, list[dict]] = {}
+    for r in rows:
+        item = dict(r)
+        partner_name = (item.get("partner") or "").strip() or "(미입력)"
+        item["partner_name"] = partner_name
+        partner_groups.setdefault(partner_name, []).append(item)
+
+    for partner_name, items in partner_groups.items():
+        items.sort(key=lambda x: (x["txn_date"], x["id"]))
+        remain_paid = paid_map.get(partner_name, 0.0)
+        for item in items:
+            if item["txn_type"] != "매입":
+                item["paid_amount"] = 0.0
+                item["unpaid_amount"] = 0.0
+                item["payable_status"] = "-"
+                continue
+            total = float(item["total_amount"] or 0)
+            paid = min(total, max(remain_paid, 0))
+            unpaid = max(total - paid, 0)
+            remain_paid -= paid
+            item["paid_amount"] = paid
+            item["unpaid_amount"] = unpaid
+            item["payable_status"] = "지급완료" if unpaid <= 0.0001 else "미지급금"
+
+    override_rows = conn.execute(
+        "SELECT voucher_id, status FROM voucher_status_overrides"
+    ).fetchall()
+    override_map = {int(r["voucher_id"]): r["status"] for r in override_rows}
+
+    merged: list[dict] = []
+    for items in partner_groups.values():
+        merged.extend(items)
+    for item in merged:
+        voucher_id = int(item.get("id", 0))
+        item["manual_status"] = override_map.get(voucher_id)
+        if item["manual_status"]:
+            item["payable_status"] = item["manual_status"]
+    merged.sort(key=lambda x: (x["txn_date"], x["id"]), reverse=True)
+    return merged
+
+
 def date_range_where() -> tuple[str | None, str | None]:
     start = request.args.get("start") or None
     end = request.args.get("end") or None
     return start, end
 
 
+def build_export_dataframes(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
+    start = request.args.get("start") or None
+    end = request.args.get("end") or None
+    txn_type = (request.args.get("txn_type") or "").strip()
+    status_filter = (request.args.get("status") or "").strip()
+    io_type = (request.args.get("io_type") or "").strip()
+
+    vouchers_rows = conn.execute(
+        """
+        SELECT id, voucher_no, txn_date, year_month, txn_type,
+               supply_amount, vat_amount, total_amount, partner, description, source_file, created_at
+        FROM vouchers
+        WHERE (? IS NULL OR txn_date >= ?)
+          AND (? IS NULL OR txn_date <= ?)
+          AND (? = '' OR txn_type = ?)
+        ORDER BY txn_date DESC, id DESC
+        """,
+        (start, start, end, end, txn_type, txn_type),
+    ).fetchall()
+    vouchers_items = apply_payable_status(conn, vouchers_rows, end)
+    if status_filter:
+        vouchers_items = [r for r in vouchers_items if str(r.get("payable_status", "")) == status_filter]
+    vouchers_df = pd.DataFrame(vouchers_items)
+    if not vouchers_df.empty:
+        vouchers_df = vouchers_df[
+            [
+                "voucher_no",
+                "txn_date",
+                "year_month",
+                "txn_type",
+                "supply_amount",
+                "vat_amount",
+                "total_amount",
+                "paid_amount",
+                "unpaid_amount",
+                "payable_status",
+                "manual_status",
+                "partner",
+                "description",
+                "source_file",
+                "created_at",
+            ]
+        ]
+        vouchers_df.columns = [
+            "전표번호",
+            "날짜",
+            "년월",
+            "구분",
+            "공급가액",
+            "부가세",
+            "합계",
+            "지급액",
+            "미지급잔액",
+            "상태",
+            "수동상태",
+            "거래처",
+            "적요",
+            "원본파일",
+            "생성일시",
+        ]
+
+    journals_df = pd.read_sql_query(
+        """
+        SELECT j.voucher_no AS 전표번호, j.txn_date AS 날짜, j.dr_cr AS 차대,
+               j.account_code AS 계정코드, COALESCE(a.account_name, '(미등록)') AS 계정과목,
+               j.amount AS 금액, j.partner AS 거래처, j.description AS 적요
+        FROM journal_entries j
+        LEFT JOIN accounts a ON a.account_code = j.account_code
+        WHERE (? IS NULL OR j.txn_date >= ?)
+          AND (? IS NULL OR j.txn_date <= ?)
+        ORDER BY j.txn_date DESC, j.voucher_no DESC, j.line_no ASC
+        """,
+        conn,
+        params=(start, start, end, end),
+    )
+
+    bank_df = pd.read_sql_query(
+        """
+        SELECT txn_date AS 거래일, io_type AS 구분, partner AS 거래처,
+               in_amount AS 입금, out_amount AS 출금, amount AS 금액,
+               description AS 내용, source_file AS 원본파일, created_at AS 생성일시
+        FROM bank_transactions
+        WHERE (? IS NULL OR txn_date >= ?)
+          AND (? IS NULL OR txn_date <= ?)
+          AND (? = '' OR io_type = ?)
+        ORDER BY txn_date DESC, id DESC
+        """,
+        conn,
+        params=(start, start, end, end, io_type, io_type),
+    )
+
+    accounts_df = pd.read_sql_query(
+        """
+        SELECT account_code AS 계정코드, account_name AS 계정과목, account_type AS 계정구분
+        FROM accounts
+        ORDER BY account_code
+        """,
+        conn,
+    )
+
+    batches_df = pd.read_sql_query(
+        """
+        SELECT id AS 배치ID, source_type AS 업로드유형, source_file AS 파일명,
+               uploaded_at AS 업로드일시, saved_count AS 저장건수
+        FROM upload_batches
+        ORDER BY id DESC
+        """,
+        conn,
+    )
+
+    return {
+        "전표원장": vouchers_df,
+        "분개장": journals_df,
+        "통장입출금": bank_df,
+        "계정과목": accounts_df,
+        "업로드이력": batches_df,
+    }
+
+
+@app.context_processor
+def inject_top_rollback_batches():
+    conn = get_conn()
+    batches = conn.execute(
+        """
+        SELECT id, uploaded_at
+        FROM upload_batches
+        ORDER BY id DESC
+        LIMIT 200
+        """
+    ).fetchall()
+    conn.close()
+    return {"top_rollback_batches": batches}
+
+
+@app.route("/export-xlsx")
+def export_xlsx():
+    if pd is None:
+        flash("엑셀 다운로드는 pandas/openpyxl 설치 후 사용할 수 있습니다.", "error")
+        return redirect(request.referrer or url_for("index"))
+
+    conn = get_conn()
+    dataframes = build_export_dataframes(conn)
+    conn.close()
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in dataframes.items():
+            export_df = df if not df.empty else pd.DataFrame([{"안내": "데이터가 없습니다."}])
+            export_df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+    output.seek(0)
+
+    now_text = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=f"afours_export_{now_text}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/")
 def index():
     conn = get_conn()
     start, end = date_range_where()
+    quick = (request.args.get("quick") or "").strip()
+    today = datetime.now().date()
+    if quick in ("60", "90"):
+        days = int(quick)
+        start = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        end = today.strftime("%Y-%m-%d")
+    else:
+        if not start:
+            start = today.replace(day=1).strftime("%Y-%m-%d")
+        if not end:
+            end = today.strftime("%Y-%m-%d")
 
     monthly = conn.execute(
         """
@@ -412,6 +1029,7 @@ def index():
         profit=profit,
         start=start,
         end=end,
+        quick=quick,
     )
 
 
@@ -434,11 +1052,13 @@ def upload():
         file.save(path)
 
         try:
-            raw_df = pd.read_excel(path, header=None)
+            raw_df = safe_read_excel(path, filename)
             raw_df = extract_columns_with_header_detection(raw_df)
             normalized = normalize_upload_dataframe(raw_df)
             conn = get_conn()
-            result = insert_uploaded_rows(conn, normalized, filename)
+            batch_id = create_upload_batch(conn, "세금계산서", filename)
+            result = insert_uploaded_rows(conn, normalized, filename, batch_id)
+            update_upload_batch_saved_count(conn, batch_id, result["saved"])
             conn.close()
             flash(
                 f"업로드 완료: 저장 {result['saved']}건 / 중복 {result['duplicate']}건 / 마감월 제외 {result['closed']}건",
@@ -452,24 +1072,195 @@ def upload():
     return render_template("upload.html", upload_enabled=True)
 
 
+@app.route("/bank-upload", methods=["GET", "POST"])
+def bank_upload():
+    if pd is None:
+        flash("현재 서버는 엑셀 업로드 비활성 모드입니다. pandas/openpyxl 설치 후 사용하세요.", "error")
+        return render_template("bank_upload.html", upload_enabled=False)
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or file.filename == "":
+            flash("통장 엑셀 파일을 선택하세요.", "error")
+            return redirect(url_for("bank_upload"))
+        if not allowed_file(file.filename):
+            flash("xlsx/xls 파일만 업로드 가능합니다.", "error")
+            return redirect(url_for("bank_upload"))
+
+        filename = secure_filename(file.filename)
+        path = UPLOAD_DIR / f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+        file.save(path)
+
+        try:
+            raw_df = safe_read_excel(path, filename)
+            raw_df = extract_bank_columns_with_header_detection(raw_df)
+            normalized = normalize_bank_dataframe(raw_df)
+            conn = get_conn()
+            batch_id = create_upload_batch(conn, "통장", filename)
+            result = insert_bank_rows(conn, normalized, filename, batch_id)
+            update_upload_batch_saved_count(conn, batch_id, result["saved"])
+            conn.close()
+            flash(
+                f"통장 업로드 완료: 저장 {result['saved']}건 / 중복 {result['duplicate']}건",
+                "success",
+            )
+        except Exception as exc:
+            flash(f"처리 실패: {exc}", "error")
+        return redirect(url_for("bank_upload"))
+
+    return render_template("bank_upload.html", upload_enabled=True)
+
+
+@app.route("/bank-transactions")
+def bank_transactions():
+    conn = get_conn()
+    start, end = date_range_where()
+    io_type = (request.args.get("io_type") or "").strip()
+    rows = conn.execute(
+        """
+        SELECT txn_date, io_type, partner, in_amount, out_amount, amount, description, source_file
+        FROM bank_transactions
+        WHERE (? IS NULL OR txn_date >= ?)
+          AND (? IS NULL OR txn_date <= ?)
+          AND (? = '' OR io_type = ?)
+        ORDER BY txn_date DESC, id DESC
+        LIMIT 1000
+        """,
+        (start, start, end, end, io_type, io_type),
+    ).fetchall()
+    conn.close()
+    return render_template(
+        "bank_transactions.html", rows=rows, start=start, end=end, io_type=io_type
+    )
+
+
+@app.route("/rollback", methods=["GET", "POST"])
+def rollback():
+    conn = get_conn()
+    if request.method == "POST":
+        selected_batch_id = request.form.get("batch_id", "").strip()
+        next_url = (request.form.get("next") or "").strip()
+        if not selected_batch_id.isdigit():
+            conn.close()
+            flash("롤백 실패: 업로드 기준을 선택하세요.", "error")
+            return redirect(next_url if next_url.startswith("/") else url_for("rollback"))
+
+        cutoff = int(selected_batch_id)
+        deleting_voucher_ids = [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM vouchers WHERE batch_id IS NOT NULL AND batch_id > ?",
+                (cutoff,),
+            ).fetchall()
+        ]
+        if deleting_voucher_ids:
+            placeholders = ",".join("?" for _ in deleting_voucher_ids)
+            conn.execute(
+                f"DELETE FROM voucher_status_overrides WHERE voucher_id IN ({placeholders})",
+                deleting_voucher_ids,
+            )
+
+        conn.execute("DELETE FROM journal_entries WHERE batch_id IS NOT NULL AND batch_id > ?", (cutoff,))
+        conn.execute("DELETE FROM vouchers WHERE batch_id IS NOT NULL AND batch_id > ?", (cutoff,))
+        conn.execute(
+            "DELETE FROM bank_transactions WHERE batch_id IS NOT NULL AND batch_id > ?",
+            (cutoff,),
+        )
+        conn.execute("DELETE FROM upload_batches WHERE id > ?", (cutoff,))
+        conn.commit()
+        conn.close()
+        flash("선택한 업로드 기준 시점으로 롤백되었습니다.", "success")
+        return redirect(next_url if next_url.startswith("/") else url_for("upload"))
+
+    batches = conn.execute(
+        """
+        SELECT id, source_type, source_file, uploaded_at, saved_count
+        FROM upload_batches
+        ORDER BY id DESC
+        LIMIT 300
+        """
+    ).fetchall()
+    conn.close()
+    return render_template("rollback.html", batches=batches)
+
+
 @app.route("/vouchers")
 def vouchers():
     conn = get_conn()
     start, end = date_range_where()
+    txn_type = (request.args.get("txn_type") or "").strip()
+    status_filter = (request.args.get("status") or "").strip()
     rows = conn.execute(
         """
-        SELECT voucher_no, txn_date, year_month, txn_type,
+        SELECT id, voucher_no, txn_date, year_month, txn_type,
                supply_amount, vat_amount, total_amount, partner, description, source_file
         FROM vouchers
         WHERE (? IS NULL OR txn_date >= ?)
           AND (? IS NULL OR txn_date <= ?)
+          AND (? = '' OR txn_type = ?)
         ORDER BY txn_date DESC, id DESC
         LIMIT 500
         """,
-        (start, start, end, end),
+        (start, start, end, end, txn_type, txn_type),
     ).fetchall()
+    rows = apply_payable_status(conn, rows, end)
+    if status_filter:
+        rows = [r for r in rows if str(r.get("payable_status", "")) == status_filter]
     conn.close()
-    return render_template("vouchers.html", rows=rows, start=start, end=end)
+    return render_template(
+        "vouchers.html",
+        rows=rows,
+        start=start,
+        end=end,
+        txn_type=txn_type,
+        status_filter=status_filter,
+    )
+
+
+@app.route("/vouchers/status", methods=["POST"])
+def update_voucher_status():
+    voucher_id = request.form.get("voucher_id", "").strip()
+    status = request.form.get("status", "").strip()
+    start = request.form.get("start", "").strip()
+    end = request.form.get("end", "").strip()
+    txn_type = request.form.get("txn_type", "").strip()
+    status_filter = request.form.get("status_filter", "").strip()
+    params = {}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    if txn_type:
+        params["txn_type"] = txn_type
+    if status_filter:
+        params["status"] = status_filter
+
+    if not voucher_id.isdigit():
+        flash("상태 변경 실패: 잘못된 전표 식별자", "error")
+        return redirect(url_for("vouchers", **params))
+
+    conn = get_conn()
+    if status in ("지급완료", "미지급금"):
+        conn.execute(
+            """
+            INSERT INTO voucher_status_overrides(voucher_id, status, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(voucher_id) DO UPDATE SET
+              status=excluded.status,
+              updated_at=CURRENT_TIMESTAMP
+            """,
+            (int(voucher_id), status),
+        )
+        conn.commit()
+        flash("상태가 수동으로 저장되었습니다.", "success")
+    else:
+        conn.execute(
+            "DELETE FROM voucher_status_overrides WHERE voucher_id = ?",
+            (int(voucher_id),),
+        )
+        conn.commit()
+        flash("수동 상태가 해제되어 자동 계산으로 복귀했습니다.", "success")
+    conn.close()
+    return redirect(url_for("vouchers", **params))
 
 
 @app.route("/journals")

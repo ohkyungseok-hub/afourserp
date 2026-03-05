@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>통장 거래내역 업로드</h2>
+<p class="help">필수 컬럼: 거래일시(또는 거래일자), 출금(또는 거래금액). 입금 컬럼이 있으면 입출금 항목이 함께 생성됩니다.</p>
+<form method="post" enctype="multipart/form-data" class="panel">
+  <input type="file" name="file" accept=".xlsx,.xls" {% if not upload_enabled %}disabled{% else %}required{% endif %}>
+  <button type="submit" {% if not upload_enabled %}disabled{% endif %}>업로드</button>
+</form>
+{% if not upload_enabled %}
+<p class="help">현재 서버는 최소 모드입니다. `pandas`, `openpyxl` 설치 후 사용 가능합니다.</p>
+{% endif %}
+{% endblock %}

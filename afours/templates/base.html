@@ -8,10 +8,24 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>AFours ERP 회계</h1>
+    <div class="topbar-head">
+      <h1>AFours ERP 회계</h1>
+      <form method="post" action="{{ url_for('rollback') }}" class="top-rollback-form" onsubmit="return confirm('선택한 업로드 일시 기준으로 이후 데이터가 삭제됩니다. 계속할까요?');">
+        <input type="hidden" name="next" value="{{ request.full_path if request.full_path else request.path }}">
+        <select name="batch_id" required>
+          <option value="">업로드 일시 선택</option>
+          {% for b in top_rollback_batches %}
+            <option value="{{ b['id'] }}">{{ b['uploaded_at'] }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="ghost">롤백</button>
+      </form>
+    </div>
     <nav>
       <a href="{{ url_for('index') }}">대시보드</a>
-      <a href="{{ url_for('upload') }}">엑셀 업로드</a>
+      <a href="{{ url_for('upload') }}">세금계산서 업로드</a>
+      <a href="{{ url_for('bank_upload') }}">통장 업로드</a>
+      <a href="{{ url_for('bank_transactions') }}">통장 입출금</a>
       <a href="{{ url_for('vouchers') }}">전표</a>
       <a href="{{ url_for('journals') }}">분개장</a>
       <a href="{{ url_for('reports') }}">시산표/손익</a>
@@ -27,6 +41,10 @@
         {% endfor %}
       {% endif %}
     {% endwith %}
+    <div class="row" style="margin-bottom: 12px;">
+      <button type="button" onclick="window.location.reload();">새로 고침</button>
+      <a href="{{ url_for('export_xlsx', **request.args.to_dict()) }}" class="btn-link">엑셀 다운로드</a>
+    </div>
 
     {% block content %}{% endblock %}
   </main>

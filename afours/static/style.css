@@ -20,6 +20,12 @@ body {
   color: #fff;
   padding: 14px 20px;
 }
+.topbar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
 .topbar h1 { margin: 0 0 8px; font-size: 20px; }
 .topbar nav { display: flex; flex-wrap: wrap; gap: 10px; }
 .topbar a {
@@ -66,6 +72,15 @@ button {
 }
 button.ghost { background: #64748b; }
 .row { display: flex; gap: 8px; }
+.top-rollback-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.top-rollback-form select {
+  min-width: 220px;
+  padding: 6px 8px;
+}
 
 table {
   width: 100%;
@@ -93,4 +108,20 @@ th { background: #f2f5f8; }
 
 @media (max-width: 768px) {
   .metrics { grid-template-columns: 1fr; }
+  .topbar-head { flex-direction: column; align-items: stretch; }
+  .top-rollback-form { width: 100%; }
+  .top-rollback-form select { min-width: 0; width: 100%; }
 }
+
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #fff;
+  text-decoration: none;
+  font-size: 14px;
+  background: var(--brand);
+}
+.btn-link.ghost { background: #64748b; }
