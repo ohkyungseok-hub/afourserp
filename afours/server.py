@@ -117,7 +117,11 @@ def db_execute(conn: Any, sql: str, params: Iterable | None = None):
 
 
 def db_executemany(conn: Any, sql: str, params_seq: Iterable[Iterable]):
-    return conn.executemany(adapt_sql(sql), params_seq)
+    if hasattr(conn, "executemany"):
+        return conn.executemany(adapt_sql(sql), params_seq)
+    with conn.cursor() as cur:
+        cur.executemany(adapt_sql(sql), params_seq)
+        return cur
 
 
 def db_read_sql(conn: Any, sql: str, params: Iterable | None = None) -> pd.DataFrame:
