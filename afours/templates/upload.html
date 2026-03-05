@@ -3,7 +3,10 @@
 <h2>엑셀 업로드</h2>
 <p class="help">필수 컬럼: 날짜, 구분(매입/매출), 공급가액. 부가세 없으면 10% 자동계산.</p>
 <form method="post" enctype="multipart/form-data" class="panel">
-  <input type="file" name="file" accept=".xlsx,.xls" required>
-  <button type="submit">업로드</button>
+  <input type="file" name="file" accept=".xlsx,.xls" {% if not upload_enabled %}disabled{% else %}required{% endif %}>
+  <button type="submit" {% if not upload_enabled %}disabled{% endif %}>업로드</button>
 </form>
+{% if not upload_enabled %}
+<p class="help">현재 서버는 최소 모드로 실행 중입니다. `pandas`, `openpyxl` 설치 후 업로드를 사용할 수 있습니다.</p>
+{% endif %}
 {% endblock %}

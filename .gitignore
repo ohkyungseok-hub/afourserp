@@ -2,3 +2,5 @@
 __pycache__/
 .venv/
 accounting.db
+uploads/
+afours/uploads/

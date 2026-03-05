@@ -4,6 +4,26 @@
 <form class="filter" method="get" action="{{ url_for('journals') }}">
   <label>시작일 <input type="date" name="start" value="{{ start or '' }}"></label>
   <label>종료일 <input type="date" name="end" value="{{ end or '' }}"></label>
+  <label>계정과목
+    <select name="account_code">
+      <option value="">전체</option>
+      {% for a in account_options %}
+        <option value="{{ a['account_code'] }}" {% if account_code == a['account_code'] %}selected{% endif %}>
+          {{ a['account_code'] }} - {{ a['account_name'] }}
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>거래처
+    <select name="partner">
+      <option value="">전체</option>
+      {% for p in partner_options %}
+        <option value="{{ p['partner_name'] }}" {% if partner == p['partner_name'] %}selected{% endif %}>
+          {{ p['partner_name'] }}
+        </option>
+      {% endfor %}
+    </select>
+  </label>
   <button type="submit">조회</button>
 </form>
 <table>

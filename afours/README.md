@@ -33,6 +33,23 @@ python server.py
 streamlit run app.py
 ```
 
+## Render 배포
+저장소 루트에 `render.yaml`이 포함되어 있어 Blueprint 배포가 가능합니다.
+
+1. GitHub 저장소를 Render에 연결
+2. `New +` -> `Blueprint` 선택
+3. 저장소 선택 후 생성 (`render.yaml` 자동 인식)
+4. 배포 완료 후 제공 URL 접속
+
+현재 설정:
+- 서비스 타입: Web Service
+- 앱 경로: `afours/`
+- 시작 명령: `gunicorn server:app`
+
+주의:
+- 기본 SQLite(`accounting.db`)는 인스턴스 재배포 시 데이터 유실될 수 있습니다.
+- 운영 환경은 Render Disk 또는 외부 DB(Postgres) 사용을 권장합니다.
+
 ## 엑셀 컬럼
 필수:
 - 날짜

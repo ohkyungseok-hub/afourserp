@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import hashlib
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
 from flask import Flask, flash, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
+try:
+    import pandas as pd
+except Exception:
+    pd = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "accounting.db"
@@ -13,9 +19,9 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"xlsx", "xls"}
 
 COLUMN_CANDIDATES = {
-    "date": ["날짜", "일자", "거래일", "date", "Date"],
-    "type": ["구분", "유형", "매입매출", "종류", "type", "Type"],
-    "supply": ["공급가액", "공급가", "금액", "amount", "Amount"],
+    "date": ["발급일자", "날짜", "일자", "거래일", "date", "Date"],
+    "type": ["영수/청구 구분", "영수청구구분", "영수/청구", "구분", "유형", "매입매출", "종류", "type", "Type"],
+    "supply": ["품목공급가액", "품목공급가", "공급가액", "공급가", "금액", "amount", "Amount"],
     "vat": ["부가세", "세액", "vat", "VAT"],
     "description": ["적요", "내용", "description", "Description"],
     "partner": ["거래처", "상호", "partner", "Partner"],
@@ -33,7 +39,7 @@ DEFAULT_ACCOUNTS = [
 ]
 
 app = Flask(__name__)
-app.secret_key = "afours-erp-secret-key"
+app.secret_key = os.environ.get("SECRET_KEY", "afours-erp-secret-key")
 app.config["UPLOAD_FOLDER"] = str(UPLOAD_DIR)
 
 
@@ -113,14 +119,22 @@ def init_db() -> None:
     conn.close()
 
 
+# Ensure schema exists when running under WSGI servers like gunicorn.
+init_db()
+
+
 def allowed_file(name: str) -> bool:
     return "." in name and name.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 def find_column(df: pd.DataFrame, key: str) -> str | None:
+    normalized_map: dict[str, str] = {}
+    for col in df.columns:
+        normalized_map[normalize_text(col)] = col
     for candidate in COLUMN_CANDIDATES[key]:
-        if candidate in df.columns:
-            return candidate
+        hit = normalized_map.get(normalize_text(candidate))
+        if hit is not None:
+            return hit
     return None
 
 
@@ -128,6 +142,10 @@ def normalize_type(value: object) -> str | None:
     if pd.isna(value):
         return None
     text = str(value).strip().lower()
+    if "영수" in text:
+        return "매출"
+    if "청구" in text:
+        return "매입"
     if "매입" in text or "purchase" in text or "buy" in text:
         return "매입"
     if "매출" in text or "sale" in text or "sell" in text:
@@ -135,12 +153,59 @@ def normalize_type(value: object) -> str | None:
     return None
 
 
+def normalize_text(value: object) -> str:
+    text = str(value).strip().lower()
+    return "".join(ch for ch in text if ch.isalnum() or ("가" <= ch <= "힣"))
+
+
+def extract_columns_with_header_detection(raw_df: pd.DataFrame) -> pd.DataFrame:
+    required_keys = ["date", "type", "supply"]
+    best_row = None
+    best_score = -1
+    scan_rows = min(len(raw_df), 15)
+
+    for i in range(scan_rows):
+        row_values = [normalize_text(v) for v in raw_df.iloc[i].tolist()]
+        score = 0
+        for key in required_keys:
+            candidates = {normalize_text(c) for c in COLUMN_CANDIDATES[key]}
+            if any(v in candidates for v in row_values):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_row = i
+
+    if best_row is None or best_score < 2:
+        df = raw_df.copy()
+        df.columns = [str(c) for c in df.columns]
+        return df
+
+    header = raw_df.iloc[best_row].tolist()
+    columns = []
+    for idx, value in enumerate(header):
+        name = str(value).strip() if pd.notna(value) else ""
+        columns.append(name if name else f"COL_{idx}")
+
+    df = raw_df.iloc[best_row + 1 :].copy().reset_index(drop=True)
+    df.columns = columns
+    return df
+
+
 def to_numeric(series: pd.Series) -> pd.Series:
     cleaned = series.astype(str).str.replace(",", "", regex=False).str.strip()
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+def get_series(df: pd.DataFrame, col: str) -> pd.Series:
+    selected = df[col]
+    if isinstance(selected, pd.DataFrame):
+        return selected.iloc[:, 0]
+    return selected
+
+
 def normalize_upload_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if pd is None:
+        raise RuntimeError("pandas/openpyxl 미설치로 엑셀 처리를 사용할 수 없습니다.")
     date_col = find_column(raw_df, "date")
     type_col = find_column(raw_df, "type")
     supply_col = find_column(raw_df, "supply")
@@ -152,14 +217,21 @@ def normalize_upload_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("필수 컬럼 부족: 날짜, 구분, 공급가액")
 
     df = pd.DataFrame()
-    df["txn_date"] = pd.to_datetime(raw_df[date_col], errors="coerce")
-    df["txn_type"] = raw_df[type_col].apply(normalize_type)
-    df["supply_amount"] = to_numeric(raw_df[supply_col])
-    df["vat_amount"] = to_numeric(raw_df[vat_col]) if vat_col else pd.NA
-    df["description"] = raw_df[desc_col].astype(str).str.strip() if desc_col else ""
+    date_series = get_series(raw_df, date_col)
+    type_series = get_series(raw_df, type_col)
+    supply_series = get_series(raw_df, supply_col)
+    vat_series = get_series(raw_df, vat_col) if vat_col else pd.Series([pd.NA] * len(raw_df))
+    desc_series = get_series(raw_df, desc_col) if desc_col else pd.Series([""] * len(raw_df))
+
+    df["txn_date"] = pd.to_datetime(date_series, errors="coerce")
+    df["txn_type"] = type_series.apply(normalize_type)
+    df["supply_amount"] = to_numeric(supply_series)
+    df["vat_amount"] = to_numeric(vat_series) if vat_col else pd.NA
+    df["description"] = desc_series.astype(str).str.strip()
 
     if partner_col:
-        df["partner"] = raw_df[partner_col].astype(str).str.strip()
+        partner_series = get_series(raw_df, partner_col)
+        df["partner"] = partner_series.astype(str).str.strip()
     else:
         df["partner"] = df["description"]
 
@@ -345,6 +417,9 @@ def index():
 
 @app.route("/upload", methods=["GET", "POST"])
 def upload():
+    if pd is None:
+        flash("현재 서버는 엑셀 업로드 비활성 모드입니다. pandas/openpyxl 설치 후 사용하세요.", "error")
+        return render_template("upload.html", upload_enabled=False)
     if request.method == "POST":
         file = request.files.get("file")
         if not file or file.filename == "":
@@ -359,7 +434,8 @@ def upload():
         file.save(path)
 
         try:
-            raw_df = pd.read_excel(path)
+            raw_df = pd.read_excel(path, header=None)
+            raw_df = extract_columns_with_header_detection(raw_df)
             normalized = normalize_upload_dataframe(raw_df)
             conn = get_conn()
             result = insert_uploaded_rows(conn, normalized, filename)
@@ -373,7 +449,7 @@ def upload():
 
         return redirect(url_for("upload"))
 
-    return render_template("upload.html")
+    return render_template("upload.html", upload_enabled=True)
 
 
 @app.route("/vouchers")
@@ -400,6 +476,25 @@ def vouchers():
 def journals():
     conn = get_conn()
     start, end = date_range_where()
+    account_code = (request.args.get("account_code") or "").strip()
+    partner = (request.args.get("partner") or "").strip()
+
+    account_options = conn.execute(
+        """
+        SELECT DISTINCT j.account_code, COALESCE(a.account_name, '(미등록)') AS account_name
+        FROM journal_entries j
+        LEFT JOIN accounts a ON a.account_code = j.account_code
+        ORDER BY j.account_code
+        """
+    ).fetchall()
+    partner_options = conn.execute(
+        """
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(partner), ''), '(미입력)') AS partner_name
+        FROM journal_entries
+        ORDER BY partner_name
+        """
+    ).fetchall()
+
     rows = conn.execute(
         """
         SELECT j.voucher_no, j.txn_date, j.dr_cr, j.account_code, a.account_name, j.amount, j.partner, j.description
@@ -407,13 +502,38 @@ def journals():
         LEFT JOIN accounts a ON a.account_code = j.account_code
         WHERE (? IS NULL OR j.txn_date >= ?)
           AND (? IS NULL OR j.txn_date <= ?)
+          AND (? = '' OR j.account_code = ?)
+          AND (
+            ? = ''
+            OR (? = '(미입력)' AND COALESCE(NULLIF(TRIM(j.partner), ''), '(미입력)') = '(미입력)')
+            OR (COALESCE(NULLIF(TRIM(j.partner), ''), '(미입력)') = ?)
+          )
         ORDER BY j.txn_date DESC, j.voucher_no DESC, j.line_no ASC
         LIMIT 1000
         """,
-        (start, start, end, end),
+        (
+            start,
+            start,
+            end,
+            end,
+            account_code,
+            account_code,
+            partner,
+            partner,
+            partner,
+        ),
     ).fetchall()
     conn.close()
-    return render_template("journals.html", rows=rows, start=start, end=end)
+    return render_template(
+        "journals.html",
+        rows=rows,
+        start=start,
+        end=end,
+        account_code=account_code,
+        partner=partner,
+        account_options=account_options,
+        partner_options=partner_options,
+    )
 
 
 @app.route("/reports")
@@ -510,5 +630,4 @@ def closing():
 
 
 if __name__ == "__main__":
-    init_db()
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=True)

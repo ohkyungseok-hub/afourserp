@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import sqlite3
 from datetime import date
@@ -10,9 +12,9 @@ import streamlit as st
 DB_PATH = Path("accounting.db")
 
 COLUMN_CANDIDATES = {
-    "date": ["날짜", "일자", "거래일", "date", "Date"],
-    "type": ["구분", "유형", "매입매출", "종류", "type", "Type"],
-    "supply": ["공급가액", "공급가", "금액", "amount", "Amount"],
+    "date": ["발급일자", "날짜", "일자", "거래일", "date", "Date"],
+    "type": ["영수/청구 구분", "영수청구구분", "영수/청구", "구분", "유형", "매입매출", "종류", "type", "Type"],
+    "supply": ["품목공급가액", "품목공급가", "공급가액", "공급가", "금액", "amount", "Amount"],
     "vat": ["부가세", "세액", "vat", "VAT"],
     "description": ["적요", "내용", "description", "Description"],
     "partner": ["거래처", "상호", "partner", "Partner"],
@@ -216,9 +218,13 @@ def migrate_legacy_transactions(conn: sqlite3.Connection) -> None:
 
 
 def find_column(df: pd.DataFrame, key: str) -> str | None:
+    normalized_map: dict[str, str] = {}
+    for col in df.columns:
+        normalized_map[normalize_text(col)] = col
     for candidate in COLUMN_CANDIDATES[key]:
-        if candidate in df.columns:
-            return candidate
+        hit = normalized_map.get(normalize_text(candidate))
+        if hit is not None:
+            return hit
     return None
 
 
@@ -226,6 +232,10 @@ def normalize_type(value: object) -> str | None:
     if pd.isna(value):
         return None
     text = str(value).strip().lower()
+    if "영수" in text:
+        return "매출"
+    if "청구" in text:
+        return "매입"
     if "매입" in text or "purchase" in text or "buy" in text:
         return "매입"
     if "매출" in text or "sale" in text or "sell" in text:
@@ -233,9 +243,54 @@ def normalize_type(value: object) -> str | None:
     return None
 
 
+def normalize_text(value: object) -> str:
+    text = str(value).strip().lower()
+    return "".join(ch for ch in text if ch.isalnum() or ("가" <= ch <= "힣"))
+
+
+def extract_columns_with_header_detection(raw_df: pd.DataFrame) -> pd.DataFrame:
+    required_keys = ["date", "type", "supply"]
+    best_row = None
+    best_score = -1
+    scan_rows = min(len(raw_df), 15)
+
+    for i in range(scan_rows):
+        row_values = [normalize_text(v) for v in raw_df.iloc[i].tolist()]
+        score = 0
+        for key in required_keys:
+            candidates = {normalize_text(c) for c in COLUMN_CANDIDATES[key]}
+            if any(v in candidates for v in row_values):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_row = i
+
+    if best_row is None or best_score < 2:
+        df = raw_df.copy()
+        df.columns = [str(c) for c in df.columns]
+        return df
+
+    header = raw_df.iloc[best_row].tolist()
+    columns = []
+    for idx, value in enumerate(header):
+        name = str(value).strip() if pd.notna(value) else ""
+        columns.append(name if name else f"COL_{idx}")
+
+    df = raw_df.iloc[best_row + 1 :].copy().reset_index(drop=True)
+    df.columns = columns
+    return df
+
+
 def to_numeric(series: pd.Series) -> pd.Series:
     cleaned = series.astype(str).str.replace(",", "", regex=False).str.strip()
     return pd.to_numeric(cleaned, errors="coerce")
+
+
+def get_series(df: pd.DataFrame, col: str) -> pd.Series:
+    selected = df[col]
+    if isinstance(selected, pd.DataFrame):
+        return selected.iloc[:, 0]
+    return selected
 
 
 def normalize_upload_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -250,19 +305,30 @@ def normalize_upload_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("필수 컬럼 부족: 날짜, 구분(매입/매출), 공급가액(또는 금액)")
 
     df = pd.DataFrame()
-    df["txn_date"] = pd.to_datetime(raw_df[date_col], errors="coerce")
-    df["txn_type"] = raw_df[type_col].apply(normalize_type)
-    df["supply_amount"] = to_numeric(raw_df[supply_col])
-    df["vat_amount"] = to_numeric(raw_df[vat_col]) if vat_col else pd.NA
+    date_series = get_series(raw_df, date_col)
+    type_series = get_series(raw_df, type_col)
+    supply_series = get_series(raw_df, supply_col)
+    vat_series = get_series(raw_df, vat_col) if vat_col else pd.Series([pd.NA] * len(raw_df))
+
+    df["txn_date"] = pd.to_datetime(date_series, errors="coerce")
+    df["txn_type"] = type_series.apply(normalize_type)
+    df["supply_amount"] = to_numeric(supply_series)
+    df["vat_amount"] = to_numeric(vat_series) if vat_col else pd.NA
 
     if partner_col:
-        df["partner"] = raw_df[partner_col].astype(str).str.strip()
+        partner_series = get_series(raw_df, partner_col)
+        df["partner"] = partner_series.astype(str).str.strip()
     elif desc_col:
-        df["partner"] = raw_df[desc_col].astype(str).str.strip()
+        desc_for_partner = get_series(raw_df, desc_col)
+        df["partner"] = desc_for_partner.astype(str).str.strip()
     else:
         df["partner"] = ""
 
-    df["description"] = raw_df[desc_col].astype(str).str.strip() if desc_col else ""
+    if desc_col:
+        desc_series = get_series(raw_df, desc_col)
+        df["description"] = desc_series.astype(str).str.strip()
+    else:
+        df["description"] = ""
     df["vat_amount"] = df["vat_amount"].fillna((df["supply_amount"] * 0.1).round(0))
     df["total_amount"] = df["supply_amount"] + df["vat_amount"]
 
@@ -868,7 +934,8 @@ def main() -> None:
 
         for file in files:
             try:
-                raw_df = pd.read_excel(file)
+                raw_df = pd.read_excel(file, header=None)
+                raw_df = extract_columns_with_header_detection(raw_df)
                 normalized = normalize_upload_dataframe(raw_df)
                 result = insert_from_upload(conn, normalized, file.name)
                 total_saved_vouchers += result["saved_vouchers"]
