@@ -7,6 +7,7 @@ import sqlite3
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, Iterable
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -23,14 +24,17 @@ except Exception:
 
 try:
     import psycopg
+    from psycopg.rows import dict_row
 except Exception:
     psycopg = None
+    dict_row = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "accounting.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"xlsx", "xls"}
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
 
 COLUMN_CANDIDATES = {
     "date": ["발급일자", "날짜", "일자", "거래일", "date", "Date"],
@@ -92,25 +96,66 @@ def is_safe_next_path(value: str | None) -> bool:
     return value.startswith("/") and not value.startswith("//")
 
 
-def get_conn() -> sqlite3.Connection:
+def get_conn() -> Any:
+    if USE_POSTGRES:
+        if psycopg is None:
+            raise RuntimeError("psycopg가 설치되지 않았습니다. requirements.txt를 확인하세요.")
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def get_pg_conn():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL 환경변수가 설정되지 않았습니다.")
-    if psycopg is None:
-        raise RuntimeError("psycopg가 설치되지 않았습니다. requirements.txt를 확인하세요.")
-    return psycopg.connect(DATABASE_URL)
+def adapt_sql(sql: str) -> str:
+    return sql.replace("?", "%s") if USE_POSTGRES else sql
 
 
-def ensure_default_auth_user(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
+def db_execute(conn: Any, sql: str, params: Iterable | None = None):
+    if params is None:
+        return conn.execute(adapt_sql(sql))
+    return conn.execute(adapt_sql(sql), params)
+
+
+def db_executemany(conn: Any, sql: str, params_seq: Iterable[Iterable]):
+    return conn.executemany(adapt_sql(sql), params_seq)
+
+
+def db_read_sql(conn: Any, sql: str, params: Iterable | None = None) -> pd.DataFrame:
+    if pd is None:
+        raise RuntimeError("pandas가 설치되지 않았습니다.")
+    return pd.read_sql_query(adapt_sql(sql), conn, params=params)
+
+
+def row_value(row: Any, key: str, idx: int = 0):
+    try:
+        return row[key]
+    except Exception:
+        return row[idx]
+
+
+def get_table_columns(conn: Any, table: str) -> set[str]:
+    if USE_POSTGRES:
+        rows = db_execute(
+            conn,
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ?
+            """,
+            (table,),
+        ).fetchall()
+        return {row_value(r, "column_name", 0) for r in rows}
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row_value(r, "name", 1) for r in rows}
+
+
+def ensure_default_auth_user(conn: Any) -> None:
+    id_column = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    db_execute(
+        conn,
+        f"""
         CREATE TABLE IF NOT EXISTS app_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             is_admin INTEGER NOT NULL DEFAULT 0,
@@ -118,14 +163,14 @@ def ensure_default_auth_user(conn: sqlite3.Connection) -> None:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-        """
+        """,
     )
 
-    current_count = conn.execute("SELECT COUNT(*) AS cnt FROM app_users").fetchone()["cnt"]
+    current_count = db_execute(conn, "SELECT COUNT(*) AS cnt FROM app_users").fetchone()["cnt"]
     if int(current_count) > 0:
         return
 
-    conn.execute(
+    db_execute(conn,
         """
         INSERT INTO app_users(username, password_hash, is_admin, is_active, created_at, updated_at)
         VALUES (?, ?, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -134,11 +179,11 @@ def ensure_default_auth_user(conn: sqlite3.Connection) -> None:
     )
 
 
-def get_current_user(conn: sqlite3.Connection) -> sqlite3.Row | None:
+def get_current_user(conn: Any) -> Any | None:
     username = (session.get("auth_user") or "").strip()
     if not username:
         return None
-    return conn.execute(
+    return db_execute(conn,
         """
         SELECT id, username, is_admin, is_active
         FROM app_users
@@ -148,8 +193,8 @@ def get_current_user(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def verify_login_credentials(conn: sqlite3.Connection, username: str, password: str) -> bool:
-    row = conn.execute(
+def verify_login_credentials(conn: Any, username: str, password: str) -> bool:
+    row = db_execute(conn,
         """
         SELECT password_hash, is_active
         FROM app_users
@@ -165,7 +210,9 @@ def verify_login_credentials(conn: sqlite3.Connection, username: str, password: 
 def init_db() -> None:
     UPLOAD_DIR.mkdir(exist_ok=True)
     conn = get_conn()
-    conn.execute(
+    id_column = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    db_execute(
+        conn,
         """
         CREATE TABLE IF NOT EXISTS accounts (
             account_code TEXT PRIMARY KEY,
@@ -174,12 +221,13 @@ def init_db() -> None:
             is_active INTEGER DEFAULT 1,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-        """
+        """,
     )
-    conn.execute(
-        """
+    db_execute(
+        conn,
+        f"""
         CREATE TABLE IF NOT EXISTS vouchers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             voucher_no TEXT NOT NULL,
             txn_date TEXT NOT NULL,
             year_month TEXT NOT NULL,
@@ -193,12 +241,13 @@ def init_db() -> None:
             voucher_hash TEXT UNIQUE NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-        """
+        """,
     )
-    conn.execute(
-        """
+    db_execute(
+        conn,
+        f"""
         CREATE TABLE IF NOT EXISTS journal_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             voucher_hash TEXT NOT NULL,
             voucher_no TEXT NOT NULL,
             line_no INTEGER NOT NULL,
@@ -212,9 +261,10 @@ def init_db() -> None:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(voucher_hash, line_no)
         )
-        """
+        """,
     )
-    conn.execute(
+    db_execute(
+        conn,
         """
         CREATE TABLE IF NOT EXISTS monthly_closing (
             year_month TEXT PRIMARY KEY,
@@ -222,12 +272,13 @@ def init_db() -> None:
             note TEXT,
             closed_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-        """
+        """,
     )
-    conn.execute(
-        """
+    db_execute(
+        conn,
+        f"""
         CREATE TABLE IF NOT EXISTS bank_transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             txn_date TEXT NOT NULL,
             year_month TEXT NOT NULL,
             partner TEXT,
@@ -240,70 +291,85 @@ def init_db() -> None:
             tx_hash TEXT UNIQUE NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-        """
+        """,
     )
-    conn.execute(
+    db_execute(
+        conn,
         """
         CREATE TABLE IF NOT EXISTS voucher_status_overrides (
             voucher_id INTEGER PRIMARY KEY,
             status TEXT NOT NULL CHECK(status IN ('지급완료', '미지급금')),
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-        """
+        """,
     )
-    conn.execute(
-        """
+    db_execute(
+        conn,
+        f"""
         CREATE TABLE IF NOT EXISTS upload_batches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_column},
             source_type TEXT NOT NULL CHECK(source_type IN ('세금계산서', '통장')),
             source_file TEXT,
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
             saved_count INTEGER DEFAULT 0
         )
-        """
+        """,
+    )
+    db_execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS products (
+            id {id_column},
+            name TEXT NOT NULL,
+            price INTEGER NOT NULL
+        )
+        """,
     )
     ensure_default_auth_user(conn)
     ensure_bank_table_columns(conn)
     ensure_batch_columns(conn)
-    conn.executemany(
-        "INSERT OR IGNORE INTO accounts(account_code, account_name, account_type) VALUES (?, ?, ?)",
-        DEFAULT_ACCOUNTS,
-    )
+    if USE_POSTGRES:
+        db_executemany(
+            conn,
+            """
+            INSERT INTO accounts(account_code, account_name, account_type)
+            VALUES (?, ?, ?)
+            ON CONFLICT (account_code) DO NOTHING
+            """,
+            DEFAULT_ACCOUNTS,
+        )
+    else:
+        db_executemany(
+            conn,
+            "INSERT OR IGNORE INTO accounts(account_code, account_name, account_type) VALUES (?, ?, ?)",
+            DEFAULT_ACCOUNTS,
+        )
     conn.commit()
     conn.close()
 
 
-def ensure_bank_table_columns(conn: sqlite3.Connection) -> None:
-    cols = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(bank_transactions)").fetchall()
-    }
+def ensure_bank_table_columns(conn: Any) -> None:
+    cols = get_table_columns(conn, "bank_transactions")
     if "io_type" not in cols:
-        conn.execute("ALTER TABLE bank_transactions ADD COLUMN io_type TEXT DEFAULT '출금'")
+        db_execute(conn, "ALTER TABLE bank_transactions ADD COLUMN io_type TEXT DEFAULT '출금'")
     if "in_amount" not in cols:
-        conn.execute("ALTER TABLE bank_transactions ADD COLUMN in_amount REAL DEFAULT 0")
+        db_execute(conn, "ALTER TABLE bank_transactions ADD COLUMN in_amount REAL DEFAULT 0")
     if "out_amount" not in cols:
-        conn.execute("ALTER TABLE bank_transactions ADD COLUMN out_amount REAL DEFAULT 0")
+        db_execute(conn, "ALTER TABLE bank_transactions ADD COLUMN out_amount REAL DEFAULT 0")
 
 
-def ensure_batch_columns(conn: sqlite3.Connection) -> None:
-    voucher_cols = {
-        row["name"] for row in conn.execute("PRAGMA table_info(vouchers)").fetchall()
-    }
+def ensure_batch_columns(conn: Any) -> None:
+    voucher_cols = get_table_columns(conn, "vouchers")
     if "batch_id" not in voucher_cols:
-        conn.execute("ALTER TABLE vouchers ADD COLUMN batch_id INTEGER")
+        db_execute(conn, "ALTER TABLE vouchers ADD COLUMN batch_id INTEGER")
 
-    journal_cols = {
-        row["name"] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()
-    }
+    journal_cols = get_table_columns(conn, "journal_entries")
     if "batch_id" not in journal_cols:
-        conn.execute("ALTER TABLE journal_entries ADD COLUMN batch_id INTEGER")
+        db_execute(conn, "ALTER TABLE journal_entries ADD COLUMN batch_id INTEGER")
 
-    bank_cols = {
-        row["name"] for row in conn.execute("PRAGMA table_info(bank_transactions)").fetchall()
-    }
+    bank_cols = get_table_columns(conn, "bank_transactions")
     if "batch_id" not in bank_cols:
-        conn.execute("ALTER TABLE bank_transactions ADD COLUMN batch_id INTEGER")
+        db_execute(conn, "ALTER TABLE bank_transactions ADD COLUMN batch_id INTEGER")
 
 
 # Ensure schema exists when running under WSGI servers like gunicorn.
@@ -625,16 +691,31 @@ def make_voucher_no(txn_date: str, voucher_hash: str) -> str:
     return f"V{txn_date.replace('-', '')}-{voucher_hash[:6].upper()}"
 
 
-def is_month_closed(conn: sqlite3.Connection, year_month: str) -> bool:
-    row = conn.execute(
+def is_month_closed(conn: Any, year_month: str) -> bool:
+    row = db_execute(
+        conn,
         "SELECT is_closed FROM monthly_closing WHERE year_month = ?",
         (year_month,),
     ).fetchone()
-    return bool(row and row[0] == 1)
+    return bool(row and row_value(row, "is_closed", 0) == 1)
 
 
-def create_upload_batch(conn: sqlite3.Connection, source_type: str, source_file: str) -> int:
-    cur = conn.execute(
+def create_upload_batch(conn: Any, source_type: str, source_file: str) -> int:
+    if USE_POSTGRES:
+        cur = db_execute(
+            conn,
+            """
+            INSERT INTO upload_batches(source_type, source_file, uploaded_at, saved_count)
+            VALUES (?, ?, CURRENT_TIMESTAMP, 0)
+            RETURNING id
+            """,
+            (source_type, source_file),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return int(row_value(row, "id", 0))
+    cur = db_execute(
+        conn,
         """
         INSERT INTO upload_batches(source_type, source_file, uploaded_at, saved_count)
         VALUES (?, ?, CURRENT_TIMESTAMP, 0)
@@ -645,8 +726,9 @@ def create_upload_batch(conn: sqlite3.Connection, source_type: str, source_file:
     return int(cur.lastrowid)
 
 
-def update_upload_batch_saved_count(conn: sqlite3.Connection, batch_id: int, saved_count: int) -> None:
-    conn.execute(
+def update_upload_batch_saved_count(conn: Any, batch_id: int, saved_count: int) -> None:
+    db_execute(
+        conn,
         "UPDATE upload_batches SET saved_count = ? WHERE id = ?",
         (int(saved_count), int(batch_id)),
     )
@@ -667,9 +749,26 @@ def create_journal_lines(txn_type: str, supply: float, vat: float) -> list[tuple
 
 
 def insert_uploaded_rows(
-    conn: sqlite3.Connection, df: pd.DataFrame, source_file: str, batch_id: int
+    conn: Any, df: pd.DataFrame, source_file: str, batch_id: int
 ) -> dict[str, int]:
     result = {"saved": 0, "duplicate": 0, "closed": 0}
+    if USE_POSTGRES:
+        insert_sql = """
+            INSERT INTO vouchers (
+                voucher_no, txn_date, year_month, txn_type,
+                supply_amount, vat_amount, total_amount,
+                description, partner, source_file, voucher_hash, batch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (voucher_hash) DO NOTHING
+        """
+    else:
+        insert_sql = """
+            INSERT OR IGNORE INTO vouchers (
+                voucher_no, txn_date, year_month, txn_type,
+                supply_amount, vat_amount, total_amount,
+                description, partner, source_file, voucher_hash, batch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
 
     for _, row in df.iterrows():
         year_month = str(row["year_month"])
@@ -679,14 +778,9 @@ def insert_uploaded_rows(
 
         voucher_hash = hash_voucher(row)
         voucher_no = make_voucher_no(row["txn_date"], voucher_hash)
-        cur = conn.execute(
-            """
-            INSERT OR IGNORE INTO vouchers (
-                voucher_no, txn_date, year_month, txn_type,
-                supply_amount, vat_amount, total_amount,
-                description, partner, source_file, voucher_hash, batch_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        cur = db_execute(
+            conn,
+            insert_sql,
             (
                 voucher_no,
                 row["txn_date"],
@@ -711,7 +805,8 @@ def insert_uploaded_rows(
         )
         line_no = 1
         for dr_cr, account_code, amount in lines:
-            conn.execute(
+            db_execute(
+                conn,
                 """
                 INSERT INTO journal_entries (
                     voucher_hash, voucher_no, line_no, txn_date, year_month,
@@ -789,18 +884,29 @@ def partner_match_score(voucher_partner: str, bank_partner: str) -> int:
 
 
 def insert_bank_rows(
-    conn: sqlite3.Connection, df: pd.DataFrame, source_file: str, batch_id: int
+    conn: Any, df: pd.DataFrame, source_file: str, batch_id: int
 ) -> dict[str, int]:
     result = {"saved": 0, "duplicate": 0}
-    for _, row in df.iterrows():
-        tx_hash = hash_bank_txn(row)
-        cur = conn.execute(
-            """
+    if USE_POSTGRES:
+        insert_sql = """
+            INSERT INTO bank_transactions (
+                txn_date, year_month, partner, io_type, amount, in_amount, out_amount,
+                description, source_file, tx_hash, batch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (tx_hash) DO NOTHING
+        """
+    else:
+        insert_sql = """
             INSERT OR IGNORE INTO bank_transactions (
                 txn_date, year_month, partner, io_type, amount, in_amount, out_amount,
                 description, source_file, tx_hash, batch_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        """
+    for _, row in df.iterrows():
+        tx_hash = hash_bank_txn(row)
+        cur = db_execute(
+            conn,
+            insert_sql,
             (
                 row["txn_date"],
                 row["year_month"],
@@ -823,8 +929,9 @@ def insert_bank_rows(
     return result
 
 
-def apply_payable_status(conn: sqlite3.Connection, rows: list[sqlite3.Row], end_date: str | None) -> list[dict]:
-    payment_rows = conn.execute(
+def apply_payable_status(conn: Any, rows: list[Any], end_date: str | None) -> list[dict]:
+    payment_rows = db_execute(
+        conn,
         """
         SELECT COALESCE(NULLIF(TRIM(partner), ''), '(미입력)') AS partner_name,
                SUM(amount) AS paid_amount
@@ -877,7 +984,7 @@ def apply_payable_status(conn: sqlite3.Connection, rows: list[sqlite3.Row], end_
             item["unpaid_amount"] = unpaid
             item["payable_status"] = "지급완료" if unpaid <= 0.0001 else "미지급금"
 
-    override_rows = conn.execute(
+    override_rows = db_execute(conn,
         "SELECT voucher_id, status FROM voucher_status_overrides"
     ).fetchall()
     override_map = {int(r["voucher_id"]): r["status"] for r in override_rows}
@@ -900,14 +1007,14 @@ def date_range_where() -> tuple[str | None, str | None]:
     return start, end
 
 
-def build_export_dataframes(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
+def build_export_dataframes(conn: Any) -> dict[str, pd.DataFrame]:
     start = request.args.get("start") or None
     end = request.args.get("end") or None
     txn_type = (request.args.get("txn_type") or "").strip()
     status_filter = (request.args.get("status") or "").strip()
     io_type = (request.args.get("io_type") or "").strip()
 
-    vouchers_rows = conn.execute(
+    vouchers_rows = db_execute(conn,
         """
         SELECT id, voucher_no, txn_date, year_month, txn_type,
                supply_amount, vat_amount, total_amount, partner, description, source_file, created_at
@@ -961,7 +1068,8 @@ def build_export_dataframes(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]
             "생성일시",
         ]
 
-    journals_df = pd.read_sql_query(
+    journals_df = db_read_sql(
+        conn,
         """
         SELECT j.voucher_no AS 전표번호, j.txn_date AS 날짜, j.dr_cr AS 차대,
                j.account_code AS 계정코드, COALESCE(a.account_name, '(미등록)') AS 계정과목,
@@ -972,11 +1080,11 @@ def build_export_dataframes(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]
           AND (? IS NULL OR j.txn_date <= ?)
         ORDER BY j.txn_date DESC, j.voucher_no DESC, j.line_no ASC
         """,
-        conn,
         params=(start, start, end, end),
     )
 
-    bank_df = pd.read_sql_query(
+    bank_df = db_read_sql(
+        conn,
         """
         SELECT txn_date AS 거래일, io_type AS 구분, partner AS 거래처,
                in_amount AS 입금, out_amount AS 출금, amount AS 금액,
@@ -987,27 +1095,26 @@ def build_export_dataframes(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]
           AND (? = '' OR io_type = ?)
         ORDER BY txn_date DESC, id DESC
         """,
-        conn,
         params=(start, start, end, end, io_type, io_type),
     )
 
-    accounts_df = pd.read_sql_query(
+    accounts_df = db_read_sql(
+        conn,
         """
         SELECT account_code AS 계정코드, account_name AS 계정과목, account_type AS 계정구분
         FROM accounts
         ORDER BY account_code
         """,
-        conn,
     )
 
-    batches_df = pd.read_sql_query(
+    batches_df = db_read_sql(
+        conn,
         """
         SELECT id AS 배치ID, source_type AS 업로드유형, source_file AS 파일명,
                uploaded_at AS 업로드일시, saved_count AS 저장건수
         FROM upload_batches
         ORDER BY id DESC
         """,
-        conn,
     )
 
     return {
@@ -1022,7 +1129,7 @@ def build_export_dataframes(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]
 @app.context_processor
 def inject_top_rollback_batches():
     conn = get_conn()
-    batches = conn.execute(
+    batches = db_execute(conn,
         """
         SELECT id, uploaded_at
         FROM upload_batches
@@ -1086,23 +1193,23 @@ def logout():
 
 @app.route("/api/products")
 def products():
-    try:
-        conn = get_pg_conn()
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    if not USE_POSTGRES:
+        return jsonify({"error": "DATABASE_URL이 설정되지 않았습니다."}), 500
 
+    conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, name, price FROM products ORDER BY id")
-            rows = cur.fetchall()
-        data = [
-            {
-                "id": r[0],
-                "name": r[1],
-                "price": float(r[2]) if r[2] is not None else None,
-            }
-            for r in rows
-        ]
+        rows = db_execute(conn, "SELECT id, name, price FROM products ORDER BY id").fetchall()
+        data = []
+        for row in rows:
+            item = dict(row)
+            price = item.get("price")
+            data.append(
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "price": float(price) if price is not None else None,
+                }
+            )
         return jsonify(data)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -1137,14 +1244,14 @@ def settings_users():
             elif not hmac.compare_digest(password, password_confirm):
                 flash("신규 비밀번호 확인값이 일치하지 않습니다.", "error")
             else:
-                exists = conn.execute(
+                exists = db_execute(conn,
                     "SELECT 1 FROM app_users WHERE username = ?",
                     (username,),
                 ).fetchone()
                 if exists:
                     flash("이미 존재하는 ID입니다.", "error")
                 else:
-                    conn.execute(
+                    db_execute(conn,
                         """
                         INSERT INTO app_users(username, password_hash, is_admin, is_active, created_at, updated_at)
                         VALUES (?, ?, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -1165,7 +1272,7 @@ def settings_users():
             elif not hmac.compare_digest(new_password, new_password_confirm):
                 flash("새 비밀번호 확인값이 일치하지 않습니다.", "error")
             else:
-                conn.execute(
+                db_execute(conn,
                     """
                     UPDATE app_users
                     SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
@@ -1181,7 +1288,7 @@ def settings_users():
         conn.close()
         return redirect(url_for("settings_users"))
 
-    users = conn.execute(
+    users = db_execute(conn,
         """
         SELECT username, is_admin, is_active, created_at, updated_at
         FROM app_users
@@ -1234,7 +1341,7 @@ def index():
         if not end:
             end = today.strftime("%Y-%m-%d")
 
-    monthly = conn.execute(
+    monthly = db_execute(conn,
         """
         SELECT year_month,
                SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END) AS sales,
@@ -1250,7 +1357,7 @@ def index():
         (start, start, end, end),
     ).fetchall()
 
-    totals = conn.execute(
+    totals = db_execute(conn,
         """
         SELECT
           COALESCE(SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END), 0) AS sales,
@@ -1360,7 +1467,7 @@ def bank_transactions():
     conn = get_conn()
     start, end = date_range_where()
     io_type = (request.args.get("io_type") or "").strip()
-    rows = conn.execute(
+    rows = db_execute(conn,
         """
         SELECT txn_date, io_type, partner, in_amount, out_amount, amount, description, source_file
         FROM bank_transactions
@@ -1392,31 +1499,31 @@ def rollback():
         cutoff = int(selected_batch_id)
         deleting_voucher_ids = [
             int(r["id"])
-            for r in conn.execute(
+            for r in db_execute(conn,
                 "SELECT id FROM vouchers WHERE batch_id IS NOT NULL AND batch_id > ?",
                 (cutoff,),
             ).fetchall()
         ]
         if deleting_voucher_ids:
             placeholders = ",".join("?" for _ in deleting_voucher_ids)
-            conn.execute(
+            db_execute(conn,
                 f"DELETE FROM voucher_status_overrides WHERE voucher_id IN ({placeholders})",
                 deleting_voucher_ids,
             )
 
-        conn.execute("DELETE FROM journal_entries WHERE batch_id IS NOT NULL AND batch_id > ?", (cutoff,))
-        conn.execute("DELETE FROM vouchers WHERE batch_id IS NOT NULL AND batch_id > ?", (cutoff,))
-        conn.execute(
+        db_execute(conn,"DELETE FROM journal_entries WHERE batch_id IS NOT NULL AND batch_id > ?", (cutoff,))
+        db_execute(conn,"DELETE FROM vouchers WHERE batch_id IS NOT NULL AND batch_id > ?", (cutoff,))
+        db_execute(conn,
             "DELETE FROM bank_transactions WHERE batch_id IS NOT NULL AND batch_id > ?",
             (cutoff,),
         )
-        conn.execute("DELETE FROM upload_batches WHERE id > ?", (cutoff,))
+        db_execute(conn,"DELETE FROM upload_batches WHERE id > ?", (cutoff,))
         conn.commit()
         conn.close()
         flash("선택한 업로드 기준 시점으로 롤백되었습니다.", "success")
         return redirect(next_url if next_url.startswith("/") else url_for("upload"))
 
-    batches = conn.execute(
+    batches = db_execute(conn,
         """
         SELECT id, source_type, source_file, uploaded_at, saved_count
         FROM upload_batches
@@ -1434,7 +1541,7 @@ def vouchers():
     start, end = date_range_where()
     txn_type = (request.args.get("txn_type") or "").strip()
     status_filter = (request.args.get("status") or "").strip()
-    rows = conn.execute(
+    rows = db_execute(conn,
         """
         SELECT id, voucher_no, txn_date, year_month, txn_type,
                supply_amount, vat_amount, total_amount, partner, description, source_file
@@ -1485,7 +1592,7 @@ def update_voucher_status():
 
     conn = get_conn()
     if status in ("지급완료", "미지급금"):
-        conn.execute(
+        db_execute(conn,
             """
             INSERT INTO voucher_status_overrides(voucher_id, status, updated_at)
             VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -1498,7 +1605,7 @@ def update_voucher_status():
         conn.commit()
         flash("상태가 수동으로 저장되었습니다.", "success")
     else:
-        conn.execute(
+        db_execute(conn,
             "DELETE FROM voucher_status_overrides WHERE voucher_id = ?",
             (int(voucher_id),),
         )
@@ -1515,7 +1622,7 @@ def journals():
     account_code = (request.args.get("account_code") or "").strip()
     partner = (request.args.get("partner") or "").strip()
 
-    account_options = conn.execute(
+    account_options = db_execute(conn,
         """
         SELECT DISTINCT j.account_code, COALESCE(a.account_name, '(미등록)') AS account_name
         FROM journal_entries j
@@ -1523,7 +1630,7 @@ def journals():
         ORDER BY j.account_code
         """
     ).fetchall()
-    partner_options = conn.execute(
+    partner_options = db_execute(conn,
         """
         SELECT DISTINCT COALESCE(NULLIF(TRIM(partner), ''), '(미입력)') AS partner_name
         FROM journal_entries
@@ -1531,7 +1638,7 @@ def journals():
         """
     ).fetchall()
 
-    rows = conn.execute(
+    rows = db_execute(conn,
         """
         SELECT j.voucher_no, j.txn_date, j.dr_cr, j.account_code, a.account_name, j.amount, j.partner, j.description
         FROM journal_entries j
@@ -1577,7 +1684,7 @@ def reports():
     conn = get_conn()
     start, end = date_range_where()
 
-    tb_rows = conn.execute(
+    tb_rows = db_execute(conn,
         """
         SELECT j.account_code, COALESCE(a.account_name, '(미등록)') AS account_name,
                SUM(CASE WHEN j.dr_cr='차변' THEN j.amount ELSE 0 END) AS debit,
@@ -1592,7 +1699,7 @@ def reports():
         (start, start, end, end),
     ).fetchall()
 
-    pl_rows = conn.execute(
+    pl_rows = db_execute(conn,
         """
         SELECT a.account_type, j.account_code, a.account_name,
                SUM(
@@ -1642,7 +1749,7 @@ def closing():
         note = request.form.get("note", "").strip()
         if year_month:
             is_closed = 1 if action == "close" else 0
-            conn.execute(
+            db_execute(conn,
                 """
                 INSERT INTO monthly_closing(year_month, is_closed, note, closed_at)
                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -1657,8 +1764,8 @@ def closing():
             flash(f"{year_month} {'마감' if is_closed else '마감해제'} 처리 완료", "success")
         return redirect(url_for("closing"))
 
-    months = conn.execute("SELECT DISTINCT year_month FROM vouchers ORDER BY year_month DESC").fetchall()
-    rows = conn.execute(
+    months = db_execute(conn,"SELECT DISTINCT year_month FROM vouchers ORDER BY year_month DESC").fetchall()
+    rows = db_execute(conn,
         "SELECT year_month, is_closed, note, closed_at FROM monthly_closing ORDER BY year_month DESC"
     ).fetchall()
     conn.close()
