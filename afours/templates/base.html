@@ -22,6 +22,7 @@
           <button type="submit" class="ghost">롤백</button>
         </form>
         {% if auth_user %}
+          <a href="{{ url_for('settings_users') }}" class="btn-link ghost">설정</a>
           <span class="auth-user">{{ auth_user }}</span>
           <form method="post" action="{{ url_for('logout') }}">
             <button type="submit" class="ghost">로그아웃</button>
@@ -38,7 +39,6 @@
       <a href="{{ url_for('journals') }}">분개장</a>
       <a href="{{ url_for('reports') }}">시산표/손익</a>
       <a href="{{ url_for('closing') }}">월마감</a>
-      <a href="{{ url_for('settings_users') }}">설정</a>
     </nav>
   </header>
 
