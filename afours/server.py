@@ -8,7 +8,7 @@ from io import BytesIO, StringIO
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, flash, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 try:
@@ -21,10 +21,16 @@ try:
 except Exception:
     Xlsx2csv = None
 
+try:
+    import psycopg
+except Exception:
+    psycopg = None
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "accounting.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"xlsx", "xls"}
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 COLUMN_CANDIDATES = {
     "date": ["발급일자", "날짜", "일자", "거래일", "date", "Date"],
@@ -90,6 +96,14 @@ def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_pg_conn():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL 환경변수가 설정되지 않았습니다.")
+    if psycopg is None:
+        raise RuntimeError("psycopg가 설치되지 않았습니다. requirements.txt를 확인하세요.")
+    return psycopg.connect(DATABASE_URL)
 
 
 def ensure_default_auth_user(conn: sqlite3.Connection) -> None:
@@ -1068,6 +1082,32 @@ def logout():
     session.clear()
     flash("로그아웃되었습니다.", "success")
     return redirect(url_for("login"))
+
+
+@app.route("/api/products")
+def products():
+    try:
+        conn = get_pg_conn()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, price FROM products ORDER BY id")
+            rows = cur.fetchall()
+        data = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "price": float(r[2]) if r[2] is not None else None,
+            }
+            for r in rows
+        ]
+        return jsonify(data)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/settings/users", methods=["GET", "POST"])

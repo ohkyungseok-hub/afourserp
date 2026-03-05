@@ -6,3 +6,4 @@ flask
 werkzeug
 gunicorn
 xlsx2csv
+psycopg[binary]
