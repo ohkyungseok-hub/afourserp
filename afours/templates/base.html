@@ -51,11 +51,32 @@
       {% endif %}
     {% endwith %}
     <div class="row" style="margin-bottom: 12px;">
+      <button
+        type="button"
+        onclick="goBackOrHome('{{ url_for('index') }}')"
+      >
+        뒤로가기
+      </button>
       <button type="button" onclick="window.location.reload();">새로 고침</button>
       <a href="{{ url_for('export_xlsx', **request.args.to_dict()) }}" class="btn-link">엑셀 다운로드</a>
     </div>
 
     {% block content %}{% endblock %}
   </main>
+  <script>
+    function goBackOrHome(fallbackUrl) {
+      const sameOriginReferrer = document.referrer && document.referrer.startsWith(window.location.origin);
+      if (window.history.length > 1 || sameOriginReferrer) {
+        window.history.back();
+        window.setTimeout(function () {
+          if (document.visibilityState === "visible") {
+            window.location.href = fallbackUrl;
+          }
+        }, 250);
+        return;
+      }
+      window.location.href = fallbackUrl;
+    }
+  </script>
 </body>
 </html>
