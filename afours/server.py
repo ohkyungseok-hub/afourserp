@@ -1174,7 +1174,6 @@ def login():
             session.clear()
             session["auth_user"] = username
             session["logged_in_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            flash("로그인되었습니다.", "success")
             if is_safe_next_path(next_path):
                 return redirect(next_path)
             return redirect(url_for("index"))
