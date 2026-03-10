@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, session, url_for
+from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 try:
@@ -35,6 +36,8 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 ALLOWED_EXTENSIONS = {"xlsx", "xls"}
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
+AUTH_COOKIE_NAME = "afours_auth"
+AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
 COLUMN_CANDIDATES = {
     "date": ["발급일자", "날짜", "일자", "거래일", "date", "Date"],
@@ -80,6 +83,25 @@ DEFAULT_ACCOUNTS = [
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "afours-erp-secret-key")
 app.config["UPLOAD_FOLDER"] = str(UPLOAD_DIR)
+
+
+def get_auth_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(app.secret_key, salt="afours-auth-cookie")
+
+
+def build_auth_cookie(username: str) -> str:
+    return get_auth_serializer().dumps({"username": username})
+
+
+def read_auth_cookie(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        payload = get_auth_serializer().loads(token, max_age=AUTH_COOKIE_MAX_AGE)
+    except (BadSignature, BadTimeSignature):
+        return None
+    username = str(payload.get("username") or "").strip()
+    return username or None
 
 
 def get_login_username() -> str:
@@ -1195,6 +1217,27 @@ def require_login():
         return None
     if session.get("auth_user"):
         return None
+    remembered_username = read_auth_cookie(request.cookies.get(AUTH_COOKIE_NAME))
+    if remembered_username:
+        conn = get_conn()
+        try:
+            row = db_execute(
+                conn,
+                """
+                SELECT username, is_active
+                FROM app_users
+                WHERE username = ?
+                """,
+                (remembered_username,),
+            ).fetchone()
+            if row and int(row["is_active"]) == 1:
+                session["auth_user"] = remembered_username
+                session["logged_in_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                log_auth_event(conn, remembered_username, "session_restored")
+                conn.commit()
+                return None
+        finally:
+            conn.close()
     next_path = request.full_path if request.query_string else request.path
     return redirect(url_for("login", next=next_path))
 
@@ -1214,9 +1257,15 @@ def login():
             log_auth_event(conn, username, "login_success")
             conn.commit()
             conn.close()
-            if is_safe_next_path(next_path):
-                return redirect(next_path)
-            return redirect(url_for("index"))
+            response = redirect(next_path) if is_safe_next_path(next_path) else redirect(url_for("index"))
+            response.set_cookie(
+                AUTH_COOKIE_NAME,
+                build_auth_cookie(username),
+                max_age=AUTH_COOKIE_MAX_AGE,
+                httponly=True,
+                samesite="Lax",
+            )
+            return response
         conn.close()
         flash("로그인 실패: 아이디 또는 비밀번호를 확인하세요.", "error")
 
@@ -1238,7 +1287,9 @@ def logout():
         conn.close()
     session.clear()
     flash("로그아웃되었습니다.", "success")
-    return redirect(url_for("login"))
+    response = redirect(url_for("login"))
+    response.delete_cookie(AUTH_COOKIE_NAME)
+    return response
 
 
 @app.route("/api/products")
