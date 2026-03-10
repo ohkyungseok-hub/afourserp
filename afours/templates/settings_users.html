@@ -71,4 +71,35 @@
       </tbody>
     </table>
   </section>
+
+  <section class="panel" style="display:block;">
+    <h3 style="margin-top: 0;">최근 인증 로그</h3>
+    <p class="help">`login_success` 가 페이지 이동마다 계속 쌓이면 실제 로그인 처리가 반복되고 있는 것입니다.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>일시</th>
+          <th>ID</th>
+          <th>이벤트</th>
+          <th>경로</th>
+          <th>IP</th>
+          <th>User-Agent</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in auth_logs %}
+          <tr>
+            <td>{{ log['created_at'] }}</td>
+            <td>{{ log['username'] }}</td>
+            <td>{{ log['event_type'] }}</td>
+            <td>{{ log['request_path'] }}</td>
+            <td>{{ log['ip_address'] }}</td>
+            <td>{{ log['user_agent'] }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">인증 로그가 없습니다.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
 {% endblock %}

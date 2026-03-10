@@ -211,6 +211,30 @@ def verify_login_credentials(conn: Any, username: str, password: str) -> bool:
     return check_password_hash(str(row["password_hash"]), password)
 
 
+def get_client_ip() -> str:
+    forwarded_for = (request.headers.get("X-Forwarded-For") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return (request.remote_addr or "").strip()
+
+
+def log_auth_event(conn: Any, username: str, event_type: str) -> None:
+    db_execute(
+        conn,
+        """
+        INSERT INTO auth_event_logs(username, event_type, request_path, ip_address, user_agent, created_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (
+            username,
+            event_type,
+            request.path,
+            get_client_ip(),
+            (request.headers.get("User-Agent") or "")[:500],
+        ),
+    )
+
+
 def init_db() -> None:
     UPLOAD_DIR.mkdir(exist_ok=True)
     conn = get_conn()
@@ -223,6 +247,20 @@ def init_db() -> None:
             account_name TEXT NOT NULL,
             account_type TEXT NOT NULL CHECK(account_type IN ('자산','부채','자본','수익','비용')),
             is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+    )
+    db_execute(
+        conn,
+        f"""
+        CREATE TABLE IF NOT EXISTS auth_event_logs (
+            id {id_column},
+            username TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            request_path TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """,
@@ -1169,14 +1207,17 @@ def login():
         next_path = (request.form.get("next") or "").strip()
         conn = get_conn()
         ok = verify_login_credentials(conn, username, password)
-        conn.close()
         if ok:
             session.clear()
             session["auth_user"] = username
             session["logged_in_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_auth_event(conn, username, "login_success")
+            conn.commit()
+            conn.close()
             if is_safe_next_path(next_path):
                 return redirect(next_path)
             return redirect(url_for("index"))
+        conn.close()
         flash("로그인 실패: 아이디 또는 비밀번호를 확인하세요.", "error")
 
     if session.get("auth_user"):
@@ -1189,6 +1230,12 @@ def login():
 
 @app.route("/logout", methods=["POST"])
 def logout():
+    username = (session.get("auth_user") or "").strip()
+    if username:
+        conn = get_conn()
+        log_auth_event(conn, username, "logout")
+        conn.commit()
+        conn.close()
     session.clear()
     flash("로그아웃되었습니다.", "success")
     return redirect(url_for("login"))
@@ -1298,8 +1345,17 @@ def settings_users():
         ORDER BY id DESC
         """
     ).fetchall()
+    auth_logs = db_execute(
+        conn,
+        """
+        SELECT username, event_type, request_path, ip_address, user_agent, created_at
+        FROM auth_event_logs
+        ORDER BY id DESC
+        LIMIT 50
+        """,
+    ).fetchall()
     conn.close()
-    return render_template("settings_users.html", users=users)
+    return render_template("settings_users.html", users=users, auth_logs=auth_logs)
 
 
 @app.route("/export-xlsx")
