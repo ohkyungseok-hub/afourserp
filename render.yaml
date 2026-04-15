@@ -1,6 +1,7 @@
 services:
   - type: web
     name: afours-erp
+    plan: free
     runtime: python
     rootDir: afours
     buildCommand: pip install -r requirements.txt
@@ -8,5 +9,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.10
-      - key: DATABASE_URL
-        value: "REPLACE_WITH_NEON_DATABASE_URL"
+      - key: SECRET_KEY
+        generateValue: true
