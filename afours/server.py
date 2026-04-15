@@ -1081,11 +1081,18 @@ def append_date_range_filters(
     start: str | None,
     end: str | None,
 ) -> tuple[str, list[Any]]:
+    insert_at = len(sql)
+    upper_sql = sql.upper()
+    for marker in ("\nGROUP BY", "\nORDER BY", "\nLIMIT", "\nHAVING"):
+        idx = upper_sql.find(marker)
+        if idx != -1:
+            insert_at = min(insert_at, idx)
     if start:
-        sql += f"\n  AND {date_column} >= ?"
+        sql = sql[:insert_at] + f"\n  AND {date_column} >= ?" + sql[insert_at:]
+        insert_at += len(f"\n  AND {date_column} >= ?")
         params.append(start)
     if end:
-        sql += f"\n  AND {date_column} <= ?"
+        sql = sql[:insert_at] + f"\n  AND {date_column} <= ?" + sql[insert_at:]
         params.append(end)
     return sql, params
 
