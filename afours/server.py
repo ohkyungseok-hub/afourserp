@@ -994,18 +994,21 @@ def insert_bank_rows(
 
 
 def apply_payable_status(conn: Any, rows: list[Any], end_date: str | None) -> list[dict]:
-    payment_rows = db_execute(
-        conn,
+    payment_sql, payment_params = append_date_range_filters(
         """
         SELECT COALESCE(NULLIF(TRIM(partner), ''), '(미입력)') AS partner_name,
                SUM(amount) AS paid_amount
         FROM bank_transactions
-        WHERE (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
           AND COALESCE(io_type, '출금') = '출금'
         GROUP BY partner_name
         """,
-        (end_date, end_date),
-    ).fetchall()
+        [],
+        "txn_date",
+        None,
+        end_date,
+    )
+    payment_rows = db_execute(conn, payment_sql, payment_params).fetchall()
     voucher_partner_names = {
         ((dict(r).get("partner") or "").strip() or "(미입력)") for r in rows
     }
@@ -1071,6 +1074,22 @@ def date_range_where() -> tuple[str | None, str | None]:
     return start, end
 
 
+def append_date_range_filters(
+    sql: str,
+    params: list[Any],
+    date_column: str,
+    start: str | None,
+    end: str | None,
+) -> tuple[str, list[Any]]:
+    if start:
+        sql += f"\n  AND {date_column} >= ?"
+        params.append(start)
+    if end:
+        sql += f"\n  AND {date_column} <= ?"
+        params.append(end)
+    return sql, params
+
+
 def build_export_dataframes(conn: Any) -> dict[str, pd.DataFrame]:
     start = request.args.get("start") or None
     end = request.args.get("end") or None
@@ -1078,18 +1097,21 @@ def build_export_dataframes(conn: Any) -> dict[str, pd.DataFrame]:
     status_filter = (request.args.get("status") or "").strip()
     io_type = (request.args.get("io_type") or "").strip()
 
-    vouchers_rows = db_execute(conn,
+    vouchers_sql, vouchers_params = append_date_range_filters(
         """
         SELECT id, voucher_no, txn_date, year_month, txn_type,
                supply_amount, vat_amount, total_amount, partner, description, source_file, created_at
         FROM vouchers
-        WHERE (? IS NULL OR txn_date >= ?)
-          AND (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
           AND (? = '' OR txn_type = ?)
         ORDER BY txn_date DESC, id DESC
         """,
-        (start, start, end, end, txn_type, txn_type),
-    ).fetchall()
+        [txn_type, txn_type],
+        "txn_date",
+        start,
+        end,
+    )
+    vouchers_rows = db_execute(conn, vouchers_sql, vouchers_params).fetchall()
     vouchers_items = apply_payable_status(conn, vouchers_rows, end)
     if status_filter:
         vouchers_items = [r for r in vouchers_items if str(r.get("payable_status", "")) == status_filter]
@@ -1132,35 +1154,39 @@ def build_export_dataframes(conn: Any) -> dict[str, pd.DataFrame]:
             "생성일시",
         ]
 
-    journals_df = db_read_sql(
-        conn,
+    journals_sql, journals_params = append_date_range_filters(
         """
         SELECT j.voucher_no AS 전표번호, j.txn_date AS 날짜, j.dr_cr AS 차대,
                j.account_code AS 계정코드, COALESCE(a.account_name, '(미등록)') AS 계정과목,
                j.amount AS 금액, j.partner AS 거래처, j.description AS 적요
         FROM journal_entries j
         LEFT JOIN accounts a ON a.account_code = j.account_code
-        WHERE (? IS NULL OR j.txn_date >= ?)
-          AND (? IS NULL OR j.txn_date <= ?)
+        WHERE 1=1
         ORDER BY j.txn_date DESC, j.voucher_no DESC, j.line_no ASC
         """,
-        params=(start, start, end, end),
+        [],
+        "j.txn_date",
+        start,
+        end,
     )
+    journals_df = db_read_sql(conn, journals_sql, params=journals_params)
 
-    bank_df = db_read_sql(
-        conn,
+    bank_sql, bank_params = append_date_range_filters(
         """
         SELECT txn_date AS 거래일, io_type AS 구분, partner AS 거래처,
                in_amount AS 입금, out_amount AS 출금, amount AS 금액,
                description AS 내용, source_file AS 원본파일, created_at AS 생성일시
         FROM bank_transactions
-        WHERE (? IS NULL OR txn_date >= ?)
-          AND (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
           AND (? = '' OR io_type = ?)
         ORDER BY txn_date DESC, id DESC
         """,
-        params=(start, start, end, end, io_type, io_type),
+        [io_type, io_type],
+        "txn_date",
+        start,
+        end,
     )
+    bank_df = db_read_sql(conn, bank_sql, params=bank_params)
 
     accounts_df = db_read_sql(
         conn,
@@ -1451,7 +1477,7 @@ def index():
         if not end:
             end = today.strftime("%Y-%m-%d")
 
-    monthly = db_execute(conn,
+    monthly_sql, monthly_params = append_date_range_filters(
         """
         SELECT year_month,
                SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END) AS sales,
@@ -1459,25 +1485,31 @@ def index():
                SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END)
                - SUM(CASE WHEN txn_type='매입' THEN supply_amount ELSE 0 END) AS profit
         FROM vouchers
-        WHERE (? IS NULL OR txn_date >= ?)
-          AND (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
         GROUP BY year_month
         ORDER BY year_month DESC
         """,
-        (start, start, end, end),
-    ).fetchall()
+        [],
+        "txn_date",
+        start,
+        end,
+    )
+    monthly = db_execute(conn, monthly_sql, monthly_params).fetchall()
 
-    totals = db_execute(conn,
+    totals_sql, totals_params = append_date_range_filters(
         """
         SELECT
           COALESCE(SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END), 0) AS sales,
           COALESCE(SUM(CASE WHEN txn_type='매입' THEN supply_amount ELSE 0 END), 0) AS purchases
         FROM vouchers
-        WHERE (? IS NULL OR txn_date >= ?)
-          AND (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
         """,
-        (start, start, end, end),
-    ).fetchone()
+        [],
+        "txn_date",
+        start,
+        end,
+    )
+    totals = db_execute(conn, totals_sql, totals_params).fetchone()
 
     conn.close()
     sales = float(totals["sales"])
@@ -1577,18 +1609,21 @@ def bank_transactions():
     conn = get_conn()
     start, end = date_range_where()
     io_type = (request.args.get("io_type") or "").strip()
-    rows = db_execute(conn,
+    rows_sql, rows_params = append_date_range_filters(
         """
         SELECT txn_date, io_type, partner, in_amount, out_amount, amount, description, source_file
         FROM bank_transactions
-        WHERE (? IS NULL OR txn_date >= ?)
-          AND (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
           AND (? = '' OR io_type = ?)
         ORDER BY txn_date DESC, id DESC
         LIMIT 1000
         """,
-        (start, start, end, end, io_type, io_type),
-    ).fetchall()
+        [io_type, io_type],
+        "txn_date",
+        start,
+        end,
+    )
+    rows = db_execute(conn, rows_sql, rows_params).fetchall()
     conn.close()
     return render_template(
         "bank_transactions.html", rows=rows, start=start, end=end, io_type=io_type
@@ -1651,19 +1686,22 @@ def vouchers():
     start, end = date_range_where()
     txn_type = (request.args.get("txn_type") or "").strip()
     status_filter = (request.args.get("status") or "").strip()
-    rows = db_execute(conn,
+    rows_sql, rows_params = append_date_range_filters(
         """
         SELECT id, voucher_no, txn_date, year_month, txn_type,
                supply_amount, vat_amount, total_amount, partner, description, source_file
         FROM vouchers
-        WHERE (? IS NULL OR txn_date >= ?)
-          AND (? IS NULL OR txn_date <= ?)
+        WHERE 1=1
           AND (? = '' OR txn_type = ?)
         ORDER BY txn_date DESC, id DESC
         LIMIT 500
         """,
-        (start, start, end, end, txn_type, txn_type),
-    ).fetchall()
+        [txn_type, txn_type],
+        "txn_date",
+        start,
+        end,
+    )
+    rows = db_execute(conn, rows_sql, rows_params).fetchall()
     rows = apply_payable_status(conn, rows, end)
     if status_filter:
         rows = [r for r in rows if str(r.get("payable_status", "")) == status_filter]
@@ -1748,13 +1786,12 @@ def journals():
         """
     ).fetchall()
 
-    rows = db_execute(conn,
+    rows_sql, rows_params = append_date_range_filters(
         """
         SELECT j.voucher_no, j.txn_date, j.dr_cr, j.account_code, a.account_name, j.amount, j.partner, j.description
         FROM journal_entries j
         LEFT JOIN accounts a ON a.account_code = j.account_code
-        WHERE (? IS NULL OR j.txn_date >= ?)
-          AND (? IS NULL OR j.txn_date <= ?)
+        WHERE 1=1
           AND (? = '' OR j.account_code = ?)
           AND (
             ? = ''
@@ -1764,18 +1801,18 @@ def journals():
         ORDER BY j.txn_date DESC, j.voucher_no DESC, j.line_no ASC
         LIMIT 1000
         """,
-        (
-            start,
-            start,
-            end,
-            end,
+        [
             account_code,
             account_code,
             partner,
             partner,
             partner,
-        ),
-    ).fetchall()
+        ],
+        "j.txn_date",
+        start,
+        end,
+    )
+    rows = db_execute(conn, rows_sql, rows_params).fetchall()
     conn.close()
     return render_template(
         "journals.html",
@@ -1794,22 +1831,25 @@ def reports():
     conn = get_conn()
     start, end = date_range_where()
 
-    tb_rows = db_execute(conn,
+    tb_sql, tb_params = append_date_range_filters(
         """
         SELECT j.account_code, COALESCE(a.account_name, '(미등록)') AS account_name,
                SUM(CASE WHEN j.dr_cr='차변' THEN j.amount ELSE 0 END) AS debit,
                SUM(CASE WHEN j.dr_cr='대변' THEN j.amount ELSE 0 END) AS credit
         FROM journal_entries j
         LEFT JOIN accounts a ON a.account_code = j.account_code
-        WHERE (? IS NULL OR j.txn_date >= ?)
-          AND (? IS NULL OR j.txn_date <= ?)
+        WHERE 1=1
         GROUP BY j.account_code, a.account_name
         ORDER BY j.account_code
         """,
-        (start, start, end, end),
-    ).fetchall()
+        [],
+        "j.txn_date",
+        start,
+        end,
+    )
+    tb_rows = db_execute(conn, tb_sql, tb_params).fetchall()
 
-    pl_rows = db_execute(conn,
+    pl_sql, pl_params = append_date_range_filters(
         """
         SELECT a.account_type, j.account_code, a.account_name,
                SUM(
@@ -1824,14 +1864,16 @@ def reports():
         FROM journal_entries j
         JOIN accounts a ON a.account_code = j.account_code
         WHERE a.account_type IN ('수익','비용')
-          AND (? IS NULL OR j.txn_date >= ?)
-          AND (? IS NULL OR j.txn_date <= ?)
         GROUP BY a.account_type, j.account_code, a.account_name
         HAVING ABS(amount) > 0.00001
         ORDER BY a.account_type, j.account_code
         """,
-        (start, start, end, end),
-    ).fetchall()
+        [],
+        "j.txn_date",
+        start,
+        end,
+    )
+    pl_rows = db_execute(conn, pl_sql, pl_params).fetchall()
 
     revenue = sum(float(r["amount"]) for r in pl_rows if r["account_type"] == "수익")
     expense = sum(float(r["amount"]) for r in pl_rows if r["account_type"] == "비용")
