@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import sqlite3
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta
@@ -1082,11 +1083,9 @@ def append_date_range_filters(
     end: str | None,
 ) -> tuple[str, list[Any]]:
     insert_at = len(sql)
-    upper_sql = sql.upper()
-    for marker in ("\nGROUP BY", "\nORDER BY", "\nLIMIT", "\nHAVING"):
-        idx = upper_sql.find(marker)
-        if idx != -1:
-            insert_at = min(insert_at, idx)
+    clause_match = re.search(r"\n\s*(GROUP BY|ORDER BY|LIMIT|HAVING)\b", sql, flags=re.IGNORECASE)
+    if clause_match:
+        insert_at = clause_match.start()
     if start:
         sql = sql[:insert_at] + f"\n  AND {date_column} >= ?" + sql[insert_at:]
         insert_at += len(f"\n  AND {date_column} >= ?")
