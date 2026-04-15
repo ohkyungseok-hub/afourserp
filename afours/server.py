@@ -1483,8 +1483,7 @@ def index():
         if not end:
             end = today.strftime("%Y-%m-%d")
 
-    monthly_sql, monthly_params = append_date_range_filters(
-        """
+    monthly_sql = """
         SELECT year_month,
                SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END) AS sales,
                SUM(CASE WHEN txn_type='매입' THEN supply_amount ELSE 0 END) AS purchases,
@@ -1492,29 +1491,34 @@ def index():
                - SUM(CASE WHEN txn_type='매입' THEN supply_amount ELSE 0 END) AS profit
         FROM vouchers
         WHERE 1=1
+    """
+    monthly_params: list[Any] = []
+    if start:
+        monthly_sql += "\n  AND txn_date >= ?"
+        monthly_params.append(start)
+    if end:
+        monthly_sql += "\n  AND txn_date <= ?"
+        monthly_params.append(end)
+    monthly_sql += """
         GROUP BY year_month
         ORDER BY year_month DESC
-        """,
-        [],
-        "txn_date",
-        start,
-        end,
-    )
+        """
     monthly = db_execute(conn, monthly_sql, monthly_params).fetchall()
 
-    totals_sql, totals_params = append_date_range_filters(
-        """
+    totals_sql = """
         SELECT
           COALESCE(SUM(CASE WHEN txn_type='매출' THEN supply_amount ELSE 0 END), 0) AS sales,
           COALESCE(SUM(CASE WHEN txn_type='매입' THEN supply_amount ELSE 0 END), 0) AS purchases
         FROM vouchers
         WHERE 1=1
-        """,
-        [],
-        "txn_date",
-        start,
-        end,
-    )
+        """
+    totals_params: list[Any] = []
+    if start:
+        totals_sql += "\n  AND txn_date >= ?"
+        totals_params.append(start)
+    if end:
+        totals_sql += "\n  AND txn_date <= ?"
+        totals_params.append(end)
     totals = db_execute(conn, totals_sql, totals_params).fetchone()
 
     conn.close()
